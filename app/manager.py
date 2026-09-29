@@ -19,6 +19,7 @@ from .linux_service import LinuxServiceManager
 from .analytics import AnalyticsManager
 from .notifier import NotificationManager, NOTIFICATION_EVENTS, DEFAULT_ENABLED_EVENTS
 from .protect_listener import ProtectListenerManager
+from .frigate_mqtt import FrigateMqttRuntime, normalize_frigate_config
 import requests
 
 class CameraManager:
@@ -65,6 +66,13 @@ class CameraManager:
         }
         self.protect_listener = None
 
+        # External analytics producers. Frigate is disabled unless explicitly
+        # configured; local AI and physical ONVIF continue to work independently.
+        self.external_analytics_config = {
+            'frigate': normalize_frigate_config()
+        }
+        self.frigate_runtime = None
+        self._external_analytics_started = False
 
         # Auth settings
         self.auth_enabled = False
@@ -211,6 +219,11 @@ class CameraManager:
                 'monitorIntervalMinutes': 30,
                 'nvrs': [],
             })
+
+            external = config.get('externalAnalytics', {})
+            self.external_analytics_config = {
+                'frigate': normalize_frigate_config(external.get('frigate'))
+            }
         else:
             self.server_ip = 'localhost'
             self.open_browser = False
@@ -233,6 +246,9 @@ class CameraManager:
             self.matrix_force_high_stream = False
             self.ip_whitelist = []
             self.alerts_thumb_size = 220
+            self.external_analytics_config = {
+                'frigate': normalize_frigate_config()
+            }
             # Default layouts if config missing
             self.grid_fusion_layouts = [{
                 'id': 'matrix',
@@ -349,7 +365,10 @@ class CameraManager:
                     'monitorIntervalMinutes': 30,
                     'nvrs': [],
                 })
-            )
+            ),
+            'externalAnalytics': getattr(self, 'external_analytics_config', {
+                'frigate': normalize_frigate_config()
+            })
         }
         
         try:
@@ -1076,6 +1095,111 @@ class CameraManager:
                 
         # Run restart in a separate thread to prevent blocking the Web UI/API
         threading.Thread(target=_do_restart, daemon=True).start()
+
+    # --- External Analytics Methods ---
+
+    def resolve_camera_reference(self, reference):
+        """Resolve an external producer mapping by camera id, name, or pathName."""
+        if reference is None:
+            return None
+
+        if isinstance(reference, int):
+            return self.get_camera(reference)
+
+        text = str(reference).strip()
+        if not text:
+            return None
+
+        if text.isdigit():
+            by_id = self.get_camera(int(text))
+            if by_id:
+                return by_id
+
+        normalized = text.lower().replace(' ', '_').replace('-', '_')
+        for camera in self.cameras:
+            candidates = {
+                str(camera.name).strip().lower(),
+                str(camera.path_name).strip().lower(),
+                str(camera.name).strip().lower().replace(' ', '_').replace('-', '_'),
+            }
+            if text.lower() in candidates or normalized in candidates:
+                return camera
+        return None
+
+    def get_external_analytics_config(self):
+        """Return external analytics settings without disclosing MQTT password."""
+        config = json.loads(json.dumps(self.external_analytics_config))
+        frigate = config.setdefault('frigate', {})
+        password = frigate.pop('password', '')
+        frigate['passwordConfigured'] = bool(password)
+        return config
+
+    def save_external_analytics_config(self, data):
+        incoming = data if isinstance(data, dict) else {}
+        current = dict(self.external_analytics_config.get('frigate') or {})
+        new_frigate = incoming.get('frigate') if isinstance(incoming.get('frigate'), dict) else incoming
+        merged = dict(current)
+        for key, value in dict(new_frigate or {}).items():
+            if key == 'passwordConfigured':
+                continue
+            if key == 'password' and value is None:
+                continue
+            merged[key] = value
+
+        self.external_analytics_config = {
+            'frigate': normalize_frigate_config(merged)
+        }
+        self.save_config()
+
+        if self._external_analytics_started:
+            self.restart_external_analytics()
+        return self.get_external_analytics_config()
+
+    def start_external_analytics(self):
+        if self._external_analytics_started:
+            return
+
+        self._external_analytics_started = True
+        frigate_config = self.external_analytics_config.get('frigate') or {}
+        self.frigate_runtime = FrigateMqttRuntime(self, frigate_config)
+        try:
+            self.frigate_runtime.start()
+            if frigate_config.get('enabled'):
+                print(
+                    f"  [External Analytics] Frigate MQTT enabled at "
+                    f"{frigate_config.get('host')}:{frigate_config.get('port')}"
+                )
+        except Exception as exc:
+            self.frigate_runtime._record_error(exc)
+            self.frigate_runtime.state = 'degraded'
+            print(f"  [External Analytics] Frigate startup failed: {exc}")
+
+    def stop_external_analytics(self):
+        runtime = self.frigate_runtime
+        self.frigate_runtime = None
+        self._external_analytics_started = False
+        if runtime:
+            runtime.stop()
+
+    def restart_external_analytics(self):
+        self.stop_external_analytics()
+        self.start_external_analytics()
+
+    def external_analytics_health(self):
+        return {
+            'frigate': (
+                self.frigate_runtime.health()
+                if self.frigate_runtime
+                else {
+                    'state': 'disabled' if not self.external_analytics_config.get('frigate', {}).get('enabled') else 'stopped',
+                    'started': False,
+                }
+            ),
+            'cameras': {
+                str(camera.id): camera.analytics_state.health()
+                for camera in self.cameras
+            },
+        }
 
     # --- Notification Config Methods ---
 
