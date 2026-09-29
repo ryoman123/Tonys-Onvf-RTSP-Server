@@ -115,7 +115,8 @@ class ProfileDefinition:
     framerate: int
     quality: int
     bitrate: int
-    h264_profile: str
+    encoding: str
+    h264_profile: str | None
 
 
 def validate_stream_setup(soap_body: str):
@@ -171,6 +172,7 @@ def profile_definition(camera, kind: str) -> ProfileDefinition:
             framerate=int(camera.main_framerate),
             quality=5,
             bitrate=4096,
+            encoding=str(getattr(camera, "main_encoding", "H264")).upper(),
             h264_profile="Main",
         )
 
@@ -193,6 +195,7 @@ def profile_definition(camera, kind: str) -> ProfileDefinition:
         framerate=int(camera.sub_framerate),
         quality=3,
         bitrate=1024,
+        encoding=str(getattr(camera, "sub_encoding", "H264")).upper(),
         h264_profile="Baseline",
     )
 
@@ -269,10 +272,18 @@ def render_video_source_configuration(camera, definition: ProfileDefinition) -> 
 
 
 def render_video_encoder_configuration(definition: ProfileDefinition) -> str:
+    codec_extension = ""
+    if definition.encoding == "H264":
+        codec_extension = f"""
+                    <tt:H264>
+                        <tt:GovLength>{definition.framerate}</tt:GovLength>
+                        <tt:H264Profile>{escape(definition.h264_profile or "Main")}</tt:H264Profile>
+                    </tt:H264>"""
+
     return f"""<tt:VideoEncoderConfiguration token="{escape(definition.video_encoder_token)}">
                     <tt:Name>{escape(definition.video_encoder_name)}</tt:Name>
                     <tt:UseCount>1</tt:UseCount>
-                    <tt:Encoding>H264</tt:Encoding>
+                    <tt:Encoding>{escape(definition.encoding)}</tt:Encoding>
                     <tt:Resolution>
                         <tt:Width>{definition.width}</tt:Width>
                         <tt:Height>{definition.height}</tt:Height>
@@ -282,11 +293,7 @@ def render_video_encoder_configuration(definition: ProfileDefinition) -> str:
                         <tt:FrameRateLimit>{definition.framerate}</tt:FrameRateLimit>
                         <tt:EncodingInterval>1</tt:EncodingInterval>
                         <tt:BitrateLimit>{definition.bitrate}</tt:BitrateLimit>
-                    </tt:RateControl>
-                    <tt:H264>
-                        <tt:GovLength>{definition.framerate}</tt:GovLength>
-                        <tt:H264Profile>{escape(definition.h264_profile)}</tt:H264Profile>
-                    </tt:H264>
+                    </tt:RateControl>{codec_extension}
                 </tt:VideoEncoderConfiguration>"""
 
 
