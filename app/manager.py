@@ -20,6 +20,7 @@ from .analytics import AnalyticsManager
 from .notifier import NotificationManager, NOTIFICATION_EVENTS, DEFAULT_ENABLED_EVENTS
 from .protect_listener import ProtectListenerManager
 from .frigate_mqtt import FrigateMqttRuntime, normalize_frigate_config
+from .recorder_events import RecorderEventRuntime, normalize_recorder_config
 import requests
 
 class CameraManager:
@@ -69,9 +70,11 @@ class CameraManager:
         # External analytics producers. Frigate is disabled unless explicitly
         # configured; local AI and physical ONVIF continue to work independently.
         self.external_analytics_config = {
-            'frigate': normalize_frigate_config()
+            'frigate': normalize_frigate_config(),
+            'recorders': []
         }
         self.frigate_runtime = None
+        self.recorder_runtimes = []
         self._external_analytics_started = False
 
         # Auth settings
@@ -221,8 +224,16 @@ class CameraManager:
             })
 
             external = config.get('externalAnalytics', {})
+            recorder_configs = external.get('recorders', [])
+            if not isinstance(recorder_configs, list):
+                recorder_configs = []
             self.external_analytics_config = {
-                'frigate': normalize_frigate_config(external.get('frigate'))
+                'frigate': normalize_frigate_config(external.get('frigate')),
+                'recorders': [
+                    normalize_recorder_config(item)
+                    for item in recorder_configs
+                    if isinstance(item, dict)
+                ]
             }
         else:
             self.server_ip = 'localhost'
@@ -247,7 +258,8 @@ class CameraManager:
             self.ip_whitelist = []
             self.alerts_thumb_size = 220
             self.external_analytics_config = {
-                'frigate': normalize_frigate_config()
+                'frigate': normalize_frigate_config(),
+                'recorders': []
             }
             # Default layouts if config missing
             self.grid_fusion_layouts = [{
@@ -367,7 +379,8 @@ class CameraManager:
                 })
             ),
             'externalAnalytics': getattr(self, 'external_analytics_config', {
-                'frigate': normalize_frigate_config()
+                'frigate': normalize_frigate_config(),
+                'recorders': []
             })
         }
         
@@ -1127,27 +1140,77 @@ class CameraManager:
         return None
 
     def get_external_analytics_config(self):
-        """Return external analytics settings without disclosing MQTT password."""
+        """Return external analytics settings without disclosing producer secrets."""
         config = json.loads(json.dumps(self.external_analytics_config))
+
         frigate = config.setdefault('frigate', {})
         password = frigate.pop('password', '')
         frigate['passwordConfigured'] = bool(password)
+
+        for recorder in config.setdefault('recorders', []):
+            password = recorder.pop('password', '')
+            recorder['passwordConfigured'] = bool(password)
+
         return config
 
     def save_external_analytics_config(self, data):
         incoming = data if isinstance(data, dict) else {}
-        current = dict(self.external_analytics_config.get('frigate') or {})
-        new_frigate = incoming.get('frigate') if isinstance(incoming.get('frigate'), dict) else incoming
-        merged = dict(current)
-        for key, value in dict(new_frigate or {}).items():
-            if key == 'passwordConfigured':
-                continue
-            if key == 'password' and value is None:
-                continue
-            merged[key] = value
+        current = self.external_analytics_config or {}
+
+        current_frigate = dict(current.get('frigate') or {})
+        if 'frigate' in incoming:
+            new_frigate = incoming.get('frigate')
+            if not isinstance(new_frigate, dict):
+                raise ValueError("externalAnalytics.frigate must be an object")
+
+            merged_frigate = dict(current_frigate)
+            for key, value in new_frigate.items():
+                if key == 'passwordConfigured':
+                    continue
+                if key == 'password' and value is None:
+                    continue
+                merged_frigate[key] = value
+            frigate = normalize_frigate_config(merged_frigate)
+        else:
+            frigate = normalize_frigate_config(current_frigate)
+
+        current_recorders = {
+            str(item.get('name') or ''): dict(item)
+            for item in current.get('recorders', [])
+            if isinstance(item, dict)
+        }
+        if 'recorders' in incoming:
+            requested = incoming.get('recorders')
+            if not isinstance(requested, list):
+                raise ValueError("externalAnalytics.recorders must be an array")
+
+            recorders = []
+            seen_names = set()
+            for raw in requested:
+                if not isinstance(raw, dict):
+                    raise ValueError("each recorder configuration must be an object")
+
+                candidate = dict(raw)
+                name = str(candidate.get('name') or 'recorder').strip() or 'recorder'
+                if name in seen_names:
+                    raise ValueError(f"duplicate recorder name: {name}")
+                seen_names.add(name)
+
+                previous = current_recorders.get(name, {})
+                if candidate.get('password') is None:
+                    candidate['password'] = previous.get('password', '')
+                candidate.pop('passwordConfigured', None)
+                recorders.append(normalize_recorder_config(candidate))
+        else:
+            recorders = [
+                normalize_recorder_config(item)
+                for item in current.get('recorders', [])
+                if isinstance(item, dict)
+            ]
 
         self.external_analytics_config = {
-            'frigate': normalize_frigate_config(merged)
+            'frigate': frigate,
+            'recorders': recorders,
         }
         self.save_config()
 
@@ -1174,11 +1237,35 @@ class CameraManager:
             self.frigate_runtime.state = 'degraded'
             print(f"  [External Analytics] Frigate startup failed: {exc}")
 
+        self.recorder_runtimes = []
+        for recorder_config in self.external_analytics_config.get('recorders', []):
+            runtime = RecorderEventRuntime(self, recorder_config)
+            self.recorder_runtimes.append(runtime)
+            try:
+                runtime.start()
+                if recorder_config.get('enabled'):
+                    print(
+                        f"  [External Analytics] Recorder "
+                        f"{recorder_config.get('name')} enabled at {runtime.url}"
+                    )
+            except Exception as exc:
+                runtime._record_error(exc)
+                runtime.state = 'degraded'
+                print(
+                    f"  [External Analytics] Recorder "
+                    f"{recorder_config.get('name')} startup failed: {exc}"
+                )
+
     def stop_external_analytics(self):
-        runtime = self.frigate_runtime
+        frigate = self.frigate_runtime
+        recorders = list(self.recorder_runtimes)
         self.frigate_runtime = None
+        self.recorder_runtimes = []
         self._external_analytics_started = False
-        if runtime:
+
+        if frigate:
+            frigate.stop()
+        for runtime in recorders:
             runtime.stop()
 
     def restart_external_analytics(self):
@@ -1191,10 +1278,18 @@ class CameraManager:
                 self.frigate_runtime.health()
                 if self.frigate_runtime
                 else {
-                    'state': 'disabled' if not self.external_analytics_config.get('frigate', {}).get('enabled') else 'stopped',
+                    'state': (
+                        'disabled'
+                        if not self.external_analytics_config.get('frigate', {}).get('enabled')
+                        else 'stopped'
+                    ),
                     'started': False,
                 }
             ),
+            'recorders': [
+                runtime.health()
+                for runtime in self.recorder_runtimes
+            ],
             'cameras': {
                 str(camera.id): camera.analytics_state.health()
                 for camera in self.cameras
