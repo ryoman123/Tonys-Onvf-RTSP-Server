@@ -120,6 +120,7 @@ def scope_escape(value) -> str:
 def scope_uris(identity) -> list[str]:
     """Return the exact fixed scopes used by both GetScopes and WS-Discovery."""
     return [
+        "onvif://www.onvif.org/type/NetworkVideoTransmitter",
         "onvif://www.onvif.org/type/video_encoder",
         "onvif://www.onvif.org/Profile/Streaming",
         f"onvif://www.onvif.org/name/{scope_escape(identity['discoveryName'])}",
