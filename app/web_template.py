@@ -3449,6 +3449,50 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                         </div>
                     </div>
 
+                    <details style="margin: 14px 0 18px; border: 1px solid var(--border-color); border-radius: 8px; padding: 12px;">
+                        <summary style="cursor: pointer; font-weight: 600; color: var(--text-title);">
+                            ONVIF Device Identity
+                        </summary>
+                        <small style="display:block; margin:8px 0 12px; color:var(--text-muted); line-height:1.45;">
+                            These values are persisted and presented consistently to UniFi Protect, ONVIF clients, and WS-Discovery.
+                            Changing them after adoption may make the camera appear to be a different device.
+                        </small>
+                        <div class="form-row">
+                            <div class="form-group" style="flex:1;">
+                                <label class="form-label">Manufacturer</label>
+                                <input type="text" class="form-input" id="identityManufacturer" placeholder="VirtualCam">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label class="form-label">Model</label>
+                                <input type="text" class="form-input" id="identityModel" placeholder="Auto from camera name">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label class="form-label">Firmware Version</label>
+                                <input type="text" class="form-input" id="identityFirmwareVersion" placeholder="1.0.0">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group" style="flex:1;">
+                                <label class="form-label">Serial Number</label>
+                                <input type="text" class="form-input" id="identitySerialNumber" placeholder="Auto from MAC">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label class="form-label">Hardware ID</label>
+                                <input type="text" class="form-input" id="identityHardwareId" placeholder="Auto">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group" style="flex:1;">
+                                <label class="form-label">Discovery Name</label>
+                                <input type="text" class="form-input" id="identityDiscoveryName" placeholder="Auto">
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label class="form-label">Location Scope</label>
+                                <input type="text" class="form-input" id="identityLocation" placeholder="virtual">
+                            </div>
+                        </div>
+                    </details>
+
                     <div class="form-group" style="margin-bottom: 10px;">
                         <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                             <input type="checkbox" id="autoStart" style="width: auto; cursor: pointer;">
@@ -6529,6 +6573,13 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
             document.getElementById('ipMode').value = 'dhcp';
             document.getElementById('staticIp').value = '';
             generateNewUuid();
+            document.getElementById('identityManufacturer').value = '';
+            document.getElementById('identityModel').value = '';
+            document.getElementById('identityFirmwareVersion').value = '';
+            document.getElementById('identitySerialNumber').value = '';
+            document.getElementById('identityHardwareId').value = '';
+            document.getElementById('identityDiscoveryName').value = '';
+            document.getElementById('identityLocation').value = '';
 
             
             document.getElementById('netmask').value = '24';
@@ -6661,6 +6712,14 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
             toggleTranscodeNotice('sub');
             document.getElementById('onvifPort').value = camera.onvifPort || '';
             document.getElementById('cameraUuid').value = camera.uuid || '';
+            const identity = camera.identity || {{}};
+            document.getElementById('identityManufacturer').value = identity.manufacturer || camera.manufacturer || '';
+            document.getElementById('identityModel').value = identity.model || camera.model || '';
+            document.getElementById('identityFirmwareVersion').value = identity.firmwareVersion || camera.firmwareVersion || '';
+            document.getElementById('identitySerialNumber').value = identity.serialNumber || camera.serialNumber || '';
+            document.getElementById('identityHardwareId').value = identity.hardwareId || camera.hardwareId || '';
+            document.getElementById('identityDiscoveryName').value = identity.discoveryName || camera.discoveryName || '';
+            document.getElementById('identityLocation').value = identity.location || camera.location || '';
             
             // Populate Network fields
             document.getElementById('useVirtualNic').checked = camera.useVirtualNic || false;
@@ -8429,6 +8488,15 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                 netmask: document.getElementById('netmask').value,
                 gateway: document.getElementById('gateway').value,
                 uuid: document.getElementById('cameraUuid').value || null,
+                identity: {{
+                    manufacturer: document.getElementById('identityManufacturer').value || null,
+                    model: document.getElementById('identityModel').value || null,
+                    firmwareVersion: document.getElementById('identityFirmwareVersion').value || null,
+                    serialNumber: document.getElementById('identitySerialNumber').value || null,
+                    hardwareId: document.getElementById('identityHardwareId').value || null,
+                    discoveryName: document.getElementById('identityDiscoveryName').value || null,
+                    location: document.getElementById('identityLocation').value || null
+                }},
                 eventSource: document.getElementById('eventSource').value,
                 aiModel: document.getElementById('aiModel').value,
                 aiTargets: (function() {{
