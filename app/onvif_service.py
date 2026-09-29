@@ -13,6 +13,14 @@ import os
 import tempfile
 from urllib.parse import quote
 from .ffmpeg_manager import FFmpegManager
+from .media_profile import (
+    MediaProfileError,
+    extract_request_text as extract_media_request_text,
+    profile_definition,
+    profile_kind_from_token,
+    render_get_profile_response,
+    render_get_profiles_response,
+)
 from .event_engine import (
     CONCRETE_SET_DIALECT,
     CONCRETE_TOPIC_DIALECT,
