@@ -47,6 +47,8 @@ class ONVIFService:
         # Prevents repetitive 401 challenges for recently authenticated clients (30 min TTL)
         self.auth_cache = {}
         self.subscriptions = {}
+        self._discovery_thread = None
+        self._discovery_stop_event = threading.Event()
         
     def create_app(self):
         """Create the Flask app for ONVIF service"""
@@ -389,11 +391,12 @@ class ONVIFService:
         return app
 
     def start_discovery_service(self, local_ip):
-        """Start WS-Discovery multicast service for ONVIF discovery"""
-        # Check if discovery is already running for this camera
-        if hasattr(self, '_discovery_thread') and self._discovery_thread and self._discovery_thread.is_alive():
+        """Start WS-Discovery multicast service for ONVIF discovery."""
+        if self._discovery_thread and self._discovery_thread.is_alive():
             return
-        
+
+        self._discovery_stop_event.clear()
+
         def discovery_responder():
             MCAST_GRP = '239.255.255.250'
             MCAST_PORT = 3702
@@ -416,7 +419,7 @@ class ONVIFService:
                 print(f"  You can still add camera manually in ODM: {local_ip}:{self.camera.onvif_port}")
                 return
             
-            while self.camera.status == "running":
+            while self.camera.status == "running" and not self._discovery_stop_event.is_set():
                 try:
                     data, addr = sock.recvfrom(10240)
                     message = data.decode('utf-8', errors='ignore')
@@ -486,8 +489,24 @@ class ONVIFService:
                 pass
         
         # Start discovery thread and store reference
-        self._discovery_thread = threading.Thread(target=discovery_responder, daemon=True)
+        self._discovery_thread = threading.Thread(
+            target=discovery_responder,
+            daemon=True,
+            name=f"ws-discovery-{self.camera.path_name}"
+        )
         self._discovery_thread.start()
+
+    def stop_discovery_service(self):
+        """Stop WS-Discovery and wait for its bounded socket timeout."""
+        self._discovery_stop_event.set()
+        thread = self._discovery_thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=2.5)
+            if thread.is_alive():
+                raise RuntimeError(
+                    f"WS-Discovery thread for {self.camera.name} did not stop within 2.5 seconds"
+                )
+        self._discovery_thread = None
 
     def _handle_get_device_info(self):
         """Handle GetDeviceInformation request"""
@@ -1477,7 +1496,7 @@ class ONVIFService:
                 import re
                 match = re.search(r'Timeout[^>]*>PT(\d+)S', soap_body)
                 if match:
-                    timeout_seconds = int(match.group(1))
+                    timeout_seconds = min(int(match.group(1)), 30)
         except Exception:
             pass
             
