@@ -13,6 +13,14 @@ import os
 import tempfile
 from urllib.parse import quote
 from .ffmpeg_manager import FFmpegManager
+from .device_capabilities import (
+    DeviceRequestError,
+    capability_categories,
+    include_capability,
+    render_get_capabilities,
+    render_get_device_service_capabilities,
+    render_get_services,
+)
 from .media_profile import (
     MediaProfileError,
     extract_request_text as extract_media_request_text,
@@ -179,7 +187,12 @@ class ONVIFService:
                 # GetDeviceInformation
                 if 'GetDeviceInformation' in soap_body:
                     return self._handle_get_device_info()
-                
+
+                # Service-specific capabilities must be checked before the
+                # generic GetCapabilities action.
+                elif 'GetServiceCapabilities' in soap_body:
+                    return self._handle_get_device_service_capabilities()
+
                 # GetCapabilities
                 elif 'GetCapabilities' in soap_body:
                     return self._handle_get_capabilities(local_ip)
@@ -199,9 +212,11 @@ class ONVIFService:
                 # GetNetworkInterfaces
                 elif 'GetNetworkInterfaces' in soap_body:
                     return self._handle_get_network_interfaces()
-                
-                # Default response
-                return self._handle_get_device_info()
+
+                return self._soap_fault(
+                    'ter:ActionNotSupported',
+                    'Unsupported Device service action'
+                )
                 
             except Exception as e:
                 print(f"  Error handling request: {e}")
@@ -551,133 +566,40 @@ class ONVIFService:
         
         return Response(soap_response, mimetype='application/soap+xml')
 
+    def _handle_get_device_service_capabilities(self):
+        """Return Device-service capabilities using the same truth source as GetServices."""
+        soap_response = render_get_device_service_capabilities()
+        return Response(soap_response, mimetype='application/soap+xml')
+
     def _handle_get_capabilities(self, local_ip):
-        """Handle GetCapabilities request"""
-        soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
-                   xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
-                   xmlns:tt="http://www.onvif.org/ver10/schema">
-    <SOAP-ENV:Body>
-        <tds:GetCapabilitiesResponse>
-            <tds:Capabilities>
-                <tt:Analytics>
-                    <tt:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/analytics_service</tt:XAddr>
-                    <tt:RuleSupport>false</tt:RuleSupport>
-                    <tt:AnalyticsModuleSupport>false</tt:AnalyticsModuleSupport>
-                </tt:Analytics>
-                <tt:Device>
-                    <tt:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/device_service</tt:XAddr>
-                    <tt:Network>
-                        <tt:IPFilter>false</tt:IPFilter>
-                        <tt:ZeroConfiguration>false</tt:ZeroConfiguration>
-                        <tt:IPVersion6>false</tt:IPVersion6>
-                        <tt:DynDNS>false</tt:DynDNS>
-                    </tt:Network>
-                    <tt:System>
-                        <tt:DiscoveryResolve>false</tt:DiscoveryResolve>
-                        <tt:DiscoveryBye>false</tt:DiscoveryBye>
-                        <tt:RemoteDiscovery>false</tt:RemoteDiscovery>
-                        <tt:SystemBackup>false</tt:SystemBackup>
-                        <tt:SystemLogging>false</tt:SystemLogging>
-                        <tt:FirmwareUpgrade>false</tt:FirmwareUpgrade>
-                        <tt:SupportedVersions>
-                            <tt:Major>2</tt:Major>
-                            <tt:Minor>5</tt:Minor>
-                        </tt:SupportedVersions>
-                    </tt:System>
-                    <tt:IO>
-                        <tt:InputConnectors>0</tt:InputConnectors>
-                        <tt:RelayOutputs>0</tt:RelayOutputs>
-                    </tt:IO>
-                    <tt:Security>
-                        <tt:TLS1.1>false</tt:TLS1.1>
-                        <tt:TLS1.2>false</tt:TLS1.2>
-                        <tt:OnboardKeyGeneration>false</tt:OnboardKeyGeneration>
-                        <tt:AccessPolicyConfig>false</tt:AccessPolicyConfig>
-                        <tt:X.509Token>false</tt:X.509Token>
-                        <tt:SAMLToken>false</tt:SAMLToken>
-                        <tt:KerberosToken>false</tt:KerberosToken>
-                        <tt:RELToken>false</tt:RELToken>
-                    </tt:Security>
-                </tt:Device>
-                <tt:Events>
-                    <tt:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/events_service</tt:XAddr>
-                    <tt:WSSubscriptionPolicySupport>true</tt:WSSubscriptionPolicySupport>
-                    <tt:WSPullPointSupport>true</tt:WSPullPointSupport>
-                    <tt:WSPausableSubscriptionManagerInterfaceSupport>false</tt:WSPausableSubscriptionManagerInterfaceSupport>
-                </tt:Events>
-                <tt:Imaging>
-                    <tt:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/imaging_service</tt:XAddr>
-                </tt:Imaging>
-                <tt:Media>
-                    <tt:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/media_service</tt:XAddr>
-                    <tt:StreamingCapabilities>
-                        <tt:RTPMulticast>false</tt:RTPMulticast>
-                        <tt:RTP_TCP>true</tt:RTP_TCP>
-                        <tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP>
-                        <tt:NonAggregateControl>false</tt:NonAggregateControl>
-                        <tt:NoRTSPStreaming>false</tt:NoRTSPStreaming>
-                    </tt:StreamingCapabilities>
-                    <tt:Extension>
-                        <tt:ProfileCapabilities>
-                            <tt:MaximumNumberOfProfiles>10</tt:MaximumNumberOfProfiles>
-                        </tt:ProfileCapabilities>
-                    </tt:Extension>
-                </tt:Media>
-                <tt:Extension>
-                    <tt:DeviceIO>
-                        <tt:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/deviceio_service</tt:XAddr>
-                        <tt:VideoSources>1</tt:VideoSources>
-                        <tt:VideoOutputs>0</tt:VideoOutputs>
-                        <tt:AudioSources>{1 if getattr(self.camera, 'enable_audio', False) else 0}</tt:AudioSources>
-                        <tt:AudioOutputs>0</tt:AudioOutputs>
-                        <tt:RelayOutputs>0</tt:RelayOutputs>
-                    </tt:DeviceIO>
-                </tt:Extension>
-            </tds:Capabilities>
-        </tds:GetCapabilitiesResponse>
-    </SOAP-ENV:Body>
-</SOAP-ENV:Envelope>"""
-        
-        return Response(soap_response, mimetype='application/soap+xml')
+        """Return only capability categories backed by live service endpoints."""
+        soap_body = request.data.decode('utf-8')
+        try:
+            categories = capability_categories(soap_body)
+        except DeviceRequestError as error:
+            return self._soap_fault('ter:InvalidArgs', str(error))
 
+        soap_response = render_get_capabilities(
+            self.camera,
+            local_ip,
+            categories,
+        )
+        return Response(soap_response, mimetype='application/soap+xml')
     def _handle_get_services(self, local_ip):
-        """Handle GetServices request"""
-        soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
-                   xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
-    <SOAP-ENV:Body>
-        <tds:GetServicesResponse>
-            <tds:Service>
-                <tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace>
-                <tds:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/device_service</tds:XAddr>
-                <tds:Version>
-                    <tt:Major xmlns:tt="http://www.onvif.org/ver10/schema">2</tt:Major>
-                    <tt:Minor xmlns:tt="http://www.onvif.org/ver10/schema">5</tt:Minor>
-                </tds:Version>
-            </tds:Service>
-            <tds:Service>
-                <tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace>
-                <tds:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/media_service</tds:XAddr>
-                <tds:Version>
-                    <tt:Major xmlns:tt="http://www.onvif.org/ver10/schema">2</tt:Major>
-                    <tt:Minor xmlns:tt="http://www.onvif.org/ver10/schema">5</tt:Minor>
-                </tds:Version>
-            </tds:Service>
-            <tds:Service>
-                <tds:Namespace>http://www.onvif.org/ver10/events/wsdl</tds:Namespace>
-                <tds:XAddr>http://{local_ip}:{self.camera.onvif_port}/onvif/events_service</tds:XAddr>
-                <tds:Version>
-                    <tt:Major xmlns:tt="http://www.onvif.org/ver10/schema">2</tt:Major>
-                    <tt:Minor xmlns:tt="http://www.onvif.org/ver10/schema">5</tt:Minor>
-                </tds:Version>
-            </tds:Service>
-        </tds:GetServicesResponse>
-    </SOAP-ENV:Body>
-</SOAP-ENV:Envelope>"""
-        
-        return Response(soap_response, mimetype='application/soap+xml')
+        """Describe the three services this runtime actually implements."""
+        soap_body = request.data.decode('utf-8')
+        try:
+            with_capabilities = include_capability(soap_body)
+        except DeviceRequestError as error:
+            return self._soap_fault('ter:InvalidArgs', str(error))
 
+        soap_response = render_get_services(
+            self.camera,
+            local_ip,
+            include_capabilities=with_capabilities,
+            max_pullpoints=self.event_engine.max_pullpoints,
+        )
+        return Response(soap_response, mimetype='application/soap+xml')
     def _handle_get_system_date_time(self):
         """Handle GetSystemDateAndTime request - Always uses UTC"""
         now = datetime.now(timezone.utc)
