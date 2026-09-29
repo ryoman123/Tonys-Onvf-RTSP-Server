@@ -11,17 +11,22 @@ from datetime import datetime, timezone, timedelta
 import sys
 import os
 import tempfile
-import queue
 from urllib.parse import quote
 from .ffmpeg_manager import FFmpegManager
-
-class VirtualSubscription:
-    def __init__(self, sub_id, client_ip=None):
-        self.sub_id = sub_id
-        self.client_ip = client_ip
-        self.queue = queue.Queue(maxsize=100)
-        import time
-        self.last_active = time.time()
+from .event_engine import (
+    CONCRETE_SET_DIALECT,
+    CONCRETE_TOPIC_DIALECT,
+    DEFAULT_TOPICS,
+    EventEngine,
+    EventSubscriptionError,
+    extract_xml_text,
+    parse_message_limit,
+    parse_pull_timeout_seconds,
+    parse_topic_filter,
+    render_notification_message,
+    render_topic_set,
+    resolve_termination_seconds,
+)
 
 # Try to import zoneinfo
 if sys.version_info >= (3, 9):
@@ -46,7 +51,9 @@ class ONVIFService:
         # Cache for authenticated IPs: {ip: timestamp}
         # Prevents repetitive 401 challenges for recently authenticated clients (30 min TTL)
         self.auth_cache = {}
-        self.subscriptions = {}
+        self.event_engine = EventEngine()
+        # Compatibility alias used by Tony's existing diagnostics/UI.
+        self.subscriptions = self.event_engine.subscriptions
         self._discovery_thread = None
         self._discovery_stop_event = threading.Event()
         
@@ -359,8 +366,11 @@ class ONVIFService:
                     return self._handle_get_event_properties()
                 elif 'GetServiceCapabilities' in soap_body:
                     return self._handle_get_event_service_capabilities()
-                    
-                return self._handle_get_event_properties()
+
+                return self._soap_fault(
+                    'ter:ActionNotSupported',
+                    'Unsupported Events service action'
+                )
             except Exception as e:
                 print(f"  Error in events service: {e}")
                 import traceback
@@ -376,12 +386,17 @@ class ONVIFService:
                 
                 if 'PullMessages' in soap_body:
                     return self._handle_pull_messages(sub_id)
+                elif 'SetSynchronizationPoint' in soap_body:
+                    return self._handle_set_synchronization_point(sub_id)
                 elif 'Unsubscribe' in soap_body:
                     return self._handle_unsubscribe(sub_id)
                 elif 'Renew' in soap_body:
                     return self._handle_renew_subscription(sub_id)
-                    
-                return Response("Bad Request", status=400)
+
+                return self._soap_fault(
+                    'ter:ActionNotSupported',
+                    'Unsupported PullPoint subscription action'
+                )
             except Exception as e:
                 print(f"  Error in subscription service: {e}")
                 import traceback
