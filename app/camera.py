@@ -183,6 +183,15 @@ class VirtualONVIFCamera:
         # Frame rate settings
         self.main_framerate = config.get('mainFramerate', 30)
         self._sub_framerate = config.get('subFramerate', 15)
+        # Protect must see the codec that is actually delivered. H.265/HEVC is
+        # a first-class pass-through mode for the field deployment; transcoded
+        # streams are H.264 because MediaMTX launches libx264 for transcoding.
+        self.main_encoding = self._normalize_video_encoding(
+            config.get('mainEncoding', 'H264')
+        )
+        self._sub_encoding = self._normalize_video_encoding(
+            config.get('subEncoding', 'H264')
+        )
         # Runtime-only: actual source stream attributes probed at start (issue #42)
         self.stream_probe = {}
         
@@ -326,6 +335,33 @@ class VirtualONVIFCamera:
             identity=self.identity,
         )
 
+    @staticmethod
+    def _normalize_video_encoding(value):
+        text = str(value or 'H264').strip().upper().replace('.', '')
+        if text in {'H265', 'HEVC'}:
+            return 'H265'
+        if text in {'H264', 'AVC'}:
+            return 'H264'
+        raise ValueError(f"Unsupported video encoding: {value!r}")
+
+    @staticmethod
+    def _codec_matches_encoding(codec, encoding):
+        observed = str(codec or '').strip().lower()
+        expected = VirtualONVIFCamera._normalize_video_encoding(encoding)
+        if not observed:
+            return True
+        if expected == 'H265':
+            return observed in {'h265', 'hevc'}
+        return observed in {'h264', 'avc'}
+
+    @property
+    def sub_encoding(self):
+        return self.main_encoding if self.use_main_as_substream else self._sub_encoding
+
+    @sub_encoding.setter
+    def sub_encoding(self, value):
+        self._sub_encoding = self._normalize_video_encoding(value)
+
     def get_effective_ip(self):
         """Determine the IP address that should be reported for this camera"""
         # 1. Use the specific IP assigned to a Virtual NIC if active
@@ -415,7 +451,7 @@ class VirtualONVIFCamera:
                     entry['mismatch'] = (
                         info['width'] != self.main_width or
                         info['height'] != self.main_height or
-                        info['codec'] not in ('h264', '')
+                        not self._codec_matches_encoding(info.get('codec'), self.main_encoding)
                     )
                     probe['main'] = entry
 
@@ -429,7 +465,7 @@ class VirtualONVIFCamera:
                     entry['mismatch'] = (
                         info['width'] != self.sub_width or
                         info['height'] != self.sub_height or
-                        info['codec'] not in ('h264', '')
+                        not self._codec_matches_encoding(info.get('codec'), self.sub_encoding)
                     )
                     probe['sub'] = entry
 
@@ -442,7 +478,8 @@ class VirtualONVIFCamera:
                         e = probe.get(which)
                         if e and e.get('mismatch'):
                             print(f"  [Stream Check] {self.name} {which}: configured "
-                                  f"{e['configuredWidth']}x{e['configuredHeight']} H264 but source is "
+                                  f"{e['configuredWidth']}x{e['configuredHeight']} "
+                                  f"{self.main_encoding if which == 'main' else self.sub_encoding} but source is "
                                   f"{e['width']}x{e['height']} {e['codec'].upper()} — "
                                   f"NVRs may flap this camera's resolution")
         except Exception as e:
@@ -623,6 +660,8 @@ class VirtualONVIFCamera:
             'subHeight': self._sub_height,
             'mainFramerate': self.main_framerate,
             'subFramerate': self._sub_framerate,
+            'mainEncoding': self.main_encoding,
+            'subEncoding': self._sub_encoding,
             'onvifUsername': self.onvif_username,
             'onvifPassword': self.onvif_password,
             'transcodeSub': self.transcode_sub,
@@ -714,6 +753,8 @@ class VirtualONVIFCamera:
             'subHeight': self._sub_height,
             'mainFramerate': self.main_framerate,
             'subFramerate': self._sub_framerate,
+            'mainEncoding': self.main_encoding,
+            'subEncoding': self._sub_encoding,
             'onvifUsername': self.onvif_username,
             'onvifPassword': self.onvif_password,
             'transcodeSub': self.transcode_sub,
