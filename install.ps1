@@ -397,7 +397,7 @@ function Setup-PythonEnvironment {
     Write-Info "  - paramiko (SSH client for NVR listener checks)"
     Write-Info "  - cryptography (encrypts stored SSH passwords)"
 
-    & $venvPython -m pip install --quiet flask flask-cors requests pyyaml psutil onvif-zeep apprise paramiko cryptography 2>&1 | Out-Null
+    & $venvPython -m pip install --quiet flask flask-cors requests pyyaml psutil onvif-zeep apprise paramiko cryptography paho-mqtt 2>&1 | Out-Null
     
     Write-Success "Python environment configured"
 }

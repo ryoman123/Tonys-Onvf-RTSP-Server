@@ -80,7 +80,8 @@ def check_and_install_requirements():
         'requests': 'requests',
         'yaml': 'pyyaml',
         'psutil': 'psutil',
-        'onvif': 'onvif-zeep'
+        'onvif': 'onvif-zeep',
+        'paho': 'paho-mqtt'
     }
     
     # Check if we need tzdata for timezone support

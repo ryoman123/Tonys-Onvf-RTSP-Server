@@ -41,7 +41,8 @@ RUN pip install --no-cache-dir \
     onvif-zeep \
     apprise \
     paramiko \
-    cryptography
+    cryptography \
+    paho-mqtt
 
 # Install CPU-only PyTorch first (keeps the image small, ~200MB vs ~2GB for GPU)
 RUN pip install --no-cache-dir \

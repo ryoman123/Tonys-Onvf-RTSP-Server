@@ -1121,6 +1121,26 @@ def create_web_app(manager):
         except Exception as e:
             return jsonify({'error': str(e)}), 400
 
+    # --- External Analytics API Routes ---
+
+    @app.route('/api/external-analytics', methods=['GET'])
+    @login_required
+    def external_analytics_get():
+        return jsonify(manager.get_external_analytics_config())
+
+    @app.route('/api/external-analytics', methods=['PUT', 'POST'])
+    @login_required
+    def external_analytics_save():
+        try:
+            return jsonify(manager.save_external_analytics_config(request.json or {}))
+        except Exception as e:
+            return jsonify({'error': str(e)}), 400
+
+    @app.route('/api/external-analytics/health', methods=['GET'])
+    @login_required
+    def external_analytics_health():
+        return jsonify(manager.external_analytics_health())
+
     # --- UniFi Protect ONVIF Listener API Routes ---
 
     @app.route('/api/protect-listener', methods=['GET'])
