@@ -1,0 +1,36 @@
+name: Unified Grand Design CI
+
+on:
+  push:
+    branches:
+      - unified-grand-design
+  pull_request:
+    branches:
+      - main
+      - unified-grand-design
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install lifecycle-test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install flask flask-cors requests werkzeug
+
+      - name: Compile application
+        run: python -m compileall -q app run.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
