@@ -12,6 +12,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import ipaddress
 from .config import CONFIG_FILE, MEDIAMTX_PORT, MEDIAMTX_API_PORT, AI_DEFAULT_MODEL, WEB_UI_PORT
 from .camera import VirtualONVIFCamera
+from .device_identity import generated_mac_from_uuid, normalize_mac, normalize_uuid
 from .onvif_service import ONVIFService
 from .mediamtx_manager import MediaMTXManager
 from .linux_service import LinuxServiceManager
@@ -701,7 +702,8 @@ class CameraManager:
                     static_ip='', netmask='24', gateway='', uuid=None,
                     enable_event_forwarding=False, physical_onvif_port=80,
                     onvif_forwarding_username='', onvif_forwarding_password='',
-                    event_source='onvif', ai_targets=None, ai_model=AI_DEFAULT_MODEL, send_smart_onvif_topics=True):
+                    event_source='onvif', ai_targets=None, ai_model=AI_DEFAULT_MODEL, send_smart_onvif_topics=True,
+                    identity=None):
         """Add a new camera"""
         if not main_path.startswith('/'):
             main_path = '/' + main_path
@@ -790,6 +792,7 @@ class CameraManager:
             'netmask': netmask,
             'gateway': gateway,
             'uuid': uuid,
+            'identity': identity or {},
             'debugMode': getattr(self, 'debug_mode', False),
             'enableEventForwarding': enable_event_forwarding,
             'physicalOnvifPort': physical_onvif_port,
@@ -802,6 +805,19 @@ class CameraManager:
         }
         
         camera = VirtualONVIFCamera(config, self)
+
+        # Validate the final canonical identity, including generated UUID/MAC
+        # values, before exposing the camera to the manager.
+        for existing in self.cameras:
+            if existing.uuid.lower() == camera.uuid.lower():
+                raise ValueError(
+                    f"Device UUID '{camera.uuid}' is already in use by camera '{existing.name}'"
+                )
+            if existing.mac_address.lower() == camera.mac_address.lower():
+                raise ValueError(
+                    f"MAC Address '{camera.mac_address}' is already in use by camera '{existing.name}'"
+                )
+
         self.cameras.append(camera)
         
         self.next_id += 1
@@ -843,7 +859,8 @@ class CameraManager:
                       static_ip='', netmask='24', gateway='', uuid=None,
                       enable_event_forwarding=False, physical_onvif_port=80,
                       onvif_forwarding_username='', onvif_forwarding_password='',
-                      event_source='onvif', ai_targets=None, ai_model=AI_DEFAULT_MODEL, send_smart_onvif_topics=True):
+                      event_source='onvif', ai_targets=None, ai_model=AI_DEFAULT_MODEL, send_smart_onvif_topics=True,
+                      identity=None):
         """Update an existing camera"""
         camera = self.get_camera(camera_id)
         if not camera:
@@ -871,18 +888,25 @@ class CameraManager:
         if not sub_path.startswith('/'):
             sub_path = '/' + sub_path
             
-        # Check for duplicate UUID or MAC Address (UniFi Protect requires uniqueness)
-        if uuid:
-            uuid_str = str(uuid).strip().lower()
-            for c in self.cameras:
-                if c.id != camera_id and getattr(c, 'uuid', None) and str(c.uuid).strip().lower() == uuid_str:
-                    raise ValueError(f"Device UUID '{uuid}' is already in use by camera '{c.name}'")
-        if nic_mac:
-            mac_str = str(nic_mac).strip().lower().replace(':', '')
-            for c in self.cameras:
-                if c.id != camera_id and getattr(c, 'nic_mac', None) and str(c.nic_mac).strip().lower().replace(':', '') == mac_str:
-                    raise ValueError(f"MAC Address '{nic_mac}' is already in use by camera '{c.name}'")
-        
+        # Preflight the candidate Protect-facing identity before mutating
+        # the stopped camera. Blank UUID keeps the existing UUID; blank MAC uses
+        # the deterministic locally-administered MAC derived from that UUID.
+        candidate_uuid = normalize_uuid(uuid) if uuid else camera.uuid
+        candidate_nic_mac = normalize_mac(nic_mac) if nic_mac else ''
+        candidate_mac = candidate_nic_mac or generated_mac_from_uuid(candidate_uuid)
+
+        for other in self.cameras:
+            if other.id == camera_id:
+                continue
+            if other.uuid.lower() == candidate_uuid.lower():
+                raise ValueError(
+                    f"Device UUID '{candidate_uuid}' is already in use by camera '{other.name}'"
+                )
+            if other.mac_address.lower() == candidate_mac.lower():
+                raise ValueError(
+                    f"MAC Address '{candidate_mac}' is already in use by camera '{other.name}'"
+                )
+
         rtsp_port = str(rtsp_port)
         
         # URL-encode credentials
@@ -931,7 +955,8 @@ class CameraManager:
         camera.use_virtual_nic = use_virtual_nic
         camera.vnic_keepalive = vnic_keepalive
         camera.parent_interface = parent_interface
-        camera.nic_mac = nic_mac
+        camera.uuid = candidate_uuid
+        camera.nic_mac = candidate_nic_mac
         camera.ip_mode = ip_mode
         camera.static_ip = static_ip
         camera.netmask = netmask
@@ -948,9 +973,9 @@ class CameraManager:
         camera.ai_model = ai_model
         camera.send_smart_onvif_topics = send_smart_onvif_topics
         
-        if uuid:
-            camera.uuid = uuid
-        
+        # Identity fields not supplied by the caller remain unchanged.
+        camera.set_identity(identity)
+
         print(f"\nUpdated camera: {name}")
         
         # Save config
