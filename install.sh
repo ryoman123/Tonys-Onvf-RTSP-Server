@@ -239,7 +239,7 @@ setup_venv() {
     print_info "  - paramiko (SSH client for NVR listener checks)"
     print_info "  - cryptography (encrypts stored SSH passwords)"
     echo "Installing Python dependencies..."
-    pip install --quiet flask flask-cors requests pyyaml psutil onvif-zeep apprise paramiko cryptography 2>/dev/null
+    pip install --quiet flask flask-cors requests pyyaml psutil onvif-zeep apprise paramiko cryptography paho-mqtt 2>/dev/null
     
     # Clean up local tmp directory
     rm -rf "$local_tmp"
