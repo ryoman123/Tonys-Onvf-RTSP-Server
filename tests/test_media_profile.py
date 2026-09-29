@@ -25,6 +25,8 @@ def make_camera(**overrides):
         "sub_width": 960,
         "sub_height": 480,
         "sub_framerate": 7,
+        "main_encoding": "H264",
+        "sub_encoding": "H264",
         "disable_substream": False,
         "enable_audio": True,
         "transcode_main_audio": False,
@@ -129,6 +131,41 @@ class MediaProfileTests(unittest.TestCase):
         ]
         self.assertEqual(len(profiles), 1)
         self.assertEqual(profiles[0].attrib["token"], "subStream_2")
+
+    def test_h265_profile_advertises_hevc_without_h264_extension(self):
+        xml = render_get_profile_response(
+            make_camera(main_encoding="H265"),
+            "main",
+        )
+        root = ET.fromstring(xml)
+        encoder = next(
+            node for node in root.iter()
+            if local_name(node.tag) == "VideoEncoderConfiguration"
+        )
+        children = {
+            local_name(child.tag): child
+            for child in encoder
+        }
+        self.assertEqual(children["Encoding"].text, "H265")
+        self.assertNotIn("H264", children)
+
+    def test_mixed_h265_main_h264_sub_profiles_keep_each_codec(self):
+        xml = render_get_profiles_response(
+            make_camera(main_encoding="H265", sub_encoding="H264")
+        )
+        root = ET.fromstring(xml)
+        encoders = [
+            node for node in root.iter()
+            if local_name(node.tag) == "VideoEncoderConfiguration"
+        ]
+        encodings = [
+            next(
+                child.text for child in encoder
+                if local_name(child.tag) == "Encoding"
+            )
+            for encoder in encoders
+        ]
+        self.assertEqual(encodings, ["H265", "H264"])
 
     def test_transcoded_audio_values_are_normalized(self):
         camera = make_camera(
