@@ -621,7 +621,7 @@ def render_notification_message(
     )
 
 
-def render_topic_set(topics=DEFAULT_TOPICS) -> str:
+def render_topic_set(topics=DEFAULT_TOPICS, *, element_name="wstop:TopicSet") -> str:
     tree = {}
     for topic in topics:
         if topic not in _TOPIC_DEFINITIONS:
@@ -659,9 +659,9 @@ def render_topic_set(topics=DEFAULT_TOPICS) -> str:
 
     nodes = "".join(render_node(name, tree[name]) for name in sorted(tree))
     return (
-        '<wstop:TopicSet xmlns:wstop="http://docs.oasis-open.org/wsn/t-1" '
+        f'<{element_name} xmlns:wstop="http://docs.oasis-open.org/wsn/t-1" '
         'xmlns:tns1="http://www.onvif.org/ver10/topics" '
         'xmlns:tt="http://www.onvif.org/ver10/schema" '
         'xmlns:xs="http://www.w3.org/2001/XMLSchema">'
-        f"{nodes}</wstop:TopicSet>"
+        f"{nodes}</{element_name}>"
     )
