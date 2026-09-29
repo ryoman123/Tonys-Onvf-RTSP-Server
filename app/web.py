@@ -21,6 +21,7 @@ from .ffmpeg_manager import FFmpegManager
 from .onvif_client import ONVIFProber
 from .linux_network import LinuxNetworkManager
 from .utils import get_captured_logs
+from .runtime_health import build_identity_manifest, build_readiness
 from .updater import UpdateChecker, check_for_updates, download_and_apply_update, is_trusted_update_url
 import subprocess
 import threading
@@ -218,6 +219,24 @@ def create_web_app(manager):
         Returns this process's boot_id so the client can detect when a genuinely
         new instance has come up (vs. the old one still answering mid-shutdown)."""
         return jsonify({'status': 'ok', 'boot_id': SERVER_BOOT_ID})
+
+    @app.route('/api/readiness')
+    def readiness_check():
+        """Sanitized production-readiness inventory.
+
+        This is deliberately separate from /api/health: liveness must keep
+        answering during dependency failures, while readiness should fail
+        closed when MediaMTX or required virtual cameras are not ready.
+        """
+        status = build_readiness(manager, boot_id=SERVER_BOOT_ID)
+        return jsonify(status), (200 if status['ready'] else 503)
+
+    @app.route('/api/identity-manifest')
+    @login_required
+    def identity_manifest():
+        """Export the stable identity baseline used by acceptance checks."""
+        status = build_readiness(manager, boot_id=SERVER_BOOT_ID)
+        return jsonify(build_identity_manifest(status))
 
     @app.route('/api/server/restart', methods=['POST'])
     @login_required
