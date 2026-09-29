@@ -830,8 +830,12 @@ class VirtualONVIFCamera:
 
     def clear_analytics_source(self, source):
         """Clear one producer without cancelling properties still held by others."""
+        analytics_state = getattr(self, 'analytics_state', None)
+        if analytics_state is None:
+            return []
+
         published = []
-        for aggregate in self.analytics_state.clear_source(source, camera=self.name):
+        for aggregate in analytics_state.clear_source(source, camera=self.name):
             if self.onvif_service:
                 onvif_event = to_onvif_event(aggregate)
                 onvif_event['camera_id'] = self.id
