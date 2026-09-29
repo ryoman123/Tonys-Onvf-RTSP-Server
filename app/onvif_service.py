@@ -487,7 +487,7 @@ class ONVIFService:
                    xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery"
                    xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
     <SOAP-ENV:Header>
-        <wsa:MessageID>uuid:{self.camera.uuid}</wsa:MessageID>
+        <wsa:MessageID>uuid:{self.camera.uuid}-{time.time_ns()}</wsa:MessageID>
         <wsa:RelatesTo>{escape(msg_id)}</wsa:RelatesTo>
         <wsa:To SOAP-ENV:mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
         <wsa:Action SOAP-ENV:mustUnderstand="true">http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches</wsa:Action>
