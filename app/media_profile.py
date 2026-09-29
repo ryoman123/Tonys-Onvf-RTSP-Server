@@ -271,7 +271,11 @@ def render_video_source_configuration(camera, definition: ProfileDefinition) -> 
                 </tt:VideoSourceConfiguration>"""
 
 
-def render_video_encoder_configuration(definition: ProfileDefinition) -> str:
+def render_video_encoder_configuration(
+    definition: ProfileDefinition,
+    *,
+    response_element: str = "tt:VideoEncoderConfiguration",
+) -> str:
     codec_extension = ""
     if definition.encoding == "H264":
         codec_extension = f"""
@@ -280,7 +284,7 @@ def render_video_encoder_configuration(definition: ProfileDefinition) -> str:
                         <tt:H264Profile>{escape(definition.h264_profile or "Main")}</tt:H264Profile>
                     </tt:H264>"""
 
-    return f"""<tt:VideoEncoderConfiguration token="{escape(definition.video_encoder_token)}">
+    return f"""<{response_element} token="{escape(definition.video_encoder_token)}">
                     <tt:Name>{escape(definition.video_encoder_name)}</tt:Name>
                     <tt:UseCount>1</tt:UseCount>
                     <tt:Encoding>{escape(definition.encoding)}</tt:Encoding>
@@ -294,7 +298,7 @@ def render_video_encoder_configuration(definition: ProfileDefinition) -> str:
                         <tt:EncodingInterval>1</tt:EncodingInterval>
                         <tt:BitrateLimit>{definition.bitrate}</tt:BitrateLimit>
                     </tt:RateControl>{codec_extension}
-                </tt:VideoEncoderConfiguration>"""
+                </{response_element}>"""
 
 
 def render_audio_source_configuration(definition: ProfileDefinition) -> str:
