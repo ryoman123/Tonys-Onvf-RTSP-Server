@@ -16,6 +16,13 @@ from .config import (
     AI_INFERENCE_FRAME_WIDTH, AI_COOLDOWN_SECONDS, AI_TARGET_INTERVAL
 )
 from .onvif_service import ONVIFService
+from .device_identity import (
+    generated_mac_from_uuid,
+    identity_manifest as build_identity_manifest,
+    normalize_identity,
+    normalize_mac,
+    normalize_uuid,
+)
 from .linux_network import LinuxNetworkManager
 from .utils import get_local_ip
 from .ai_device import get_shared_model as get_shared_ai_model, AI_INFERENCE_LOCK as _AI_INFERENCE_LOCK
@@ -157,7 +164,7 @@ class VirtualONVIFCamera:
     def __init__(self, config, manager=None):
         self.manager = manager
         self.id = config['id']
-        self.uuid = config.get('uuid') or str(uuid.uuid4())
+        self.uuid = normalize_uuid(config.get('uuid'))
         self.name = config['name']
         self.main_stream_url = config['mainStreamUrl']
         self.sub_stream_url = config['subStreamUrl']
@@ -208,6 +215,14 @@ class VirtualONVIFCamera:
         self.netmask = config.get('netmask', '24')
         self.gateway = config.get('gateway', '')
         self.debug_mode = config.get('debugMode', False)
+
+        # Canonical Protect/ONVIF identity is persisted separately from mutable
+        # stream/display settings. Legacy configs migrate deterministically.
+        self.identity = normalize_identity(
+            config.get('identity'),
+            camera_name=self.name,
+            mac=self.mac_address,
+        )
         self.assigned_ip = None
         self.network_mgr = LinuxNetworkManager() if LinuxNetworkManager.is_linux() else None
         
@@ -286,18 +301,29 @@ class VirtualONVIFCamera:
 
     @property
     def mac_address(self):
-        """Get the MAC address for this camera (Virtual NIC or generated)"""
-        if self.nic_mac and ':' in self.nic_mac:
-            return self.nic_mac.lower()
-        
-        # Generate a stable MAC based on camera UUID if none provided
-        # Use hashlib to get a deterministic hash from the UUID
-        h = hashlib.md5(self.uuid.encode()).hexdigest()
-        # Take the first 10 characters for the MAC suffix (5 bytes)
-        # Prefix with 02 to indicate locally administered
-        mac = f"02:{h[0:2]}:{h[2:4]}:{h[4:6]}:{h[6:8]}:{h[8:10]}"
-        return mac.lower()
-        
+        """Return the canonical Protect-facing MAC address for this camera."""
+        if self.nic_mac:
+            return normalize_mac(self.nic_mac)
+        return generated_mac_from_uuid(self.uuid)
+
+    def set_identity(self, identity=None):
+        """Apply a partial identity update without drifting unspecified fields."""
+        self.identity = normalize_identity(
+            identity,
+            camera_name=self.name,
+            mac=self.mac_address,
+            existing=getattr(self, 'identity', None),
+        )
+        return self.identity
+
+    def get_identity_manifest(self):
+        """Return the exact identity tuple clients should observe everywhere."""
+        return build_identity_manifest(
+            device_uuid=self.uuid,
+            mac=self.mac_address,
+            identity=self.identity,
+        )
+
     def get_effective_ip(self):
         """Determine the IP address that should be reported for this camera"""
         # 1. Use the specific IP assigned to a Virtual NIC if active
@@ -570,6 +596,15 @@ class VirtualONVIFCamera:
             'id': self.id,
             'uuid': self.uuid,
             'name': self.name,
+            'identity': dict(self.identity),
+            'identityManifest': self.get_identity_manifest(),
+            'manufacturer': self.identity['manufacturer'],
+            'model': self.identity['model'],
+            'firmwareVersion': self.identity['firmwareVersion'],
+            'serialNumber': self.identity['serialNumber'],
+            'hardwareId': self.identity['hardwareId'],
+            'location': self.identity['location'],
+            'discoveryName': self.identity['discoveryName'],
             'host': self.get_effective_ip(),
             'mainStreamUrl': self.main_stream_url,
             'subStreamUrl': self.sub_stream_url,
@@ -659,6 +694,7 @@ class VirtualONVIFCamera:
             'id': self.id,
             'uuid': self.uuid,
             'name': self.name,
+            'identity': dict(self.identity),
             'mainStreamUrl': self.main_stream_url,
             'subStreamUrl': self.sub_stream_url,
             'rtspPort': self.rtsp_port,

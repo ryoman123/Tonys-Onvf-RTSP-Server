@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 import sys
 import os
 import tempfile
+from xml.sax.saxutils import escape
 from urllib.parse import quote
 from .ffmpeg_manager import FFmpegManager
 from .device_capabilities import (
@@ -477,6 +478,8 @@ class ONVIFService:
                             except:
                                 pass
                         
+                        identity = self.camera.get_identity_manifest()
+                        discovery_scopes = " ".join(identity["scopes"])
                         response = f'''<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
                    xmlns:SOAP-ENC="http://www.w3.org/2003/05/soap-encoding"
@@ -484,8 +487,8 @@ class ONVIFService:
                    xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery"
                    xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
     <SOAP-ENV:Header>
-        <wsa:MessageID>uuid:{self.camera.id}-{time.time()}</wsa:MessageID>
-        <wsa:RelatesTo>{msg_id}</wsa:RelatesTo>
+        <wsa:MessageID>uuid:{self.camera.uuid}-{time.time_ns()}</wsa:MessageID>
+        <wsa:RelatesTo>{escape(msg_id)}</wsa:RelatesTo>
         <wsa:To SOAP-ENV:mustUnderstand="true">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
         <wsa:Action SOAP-ENV:mustUnderstand="true">http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches</wsa:Action>
     </SOAP-ENV:Header>
@@ -493,11 +496,11 @@ class ONVIFService:
         <d:ProbeMatches>
             <d:ProbeMatch>
                 <wsa:EndpointReference>
-                    <wsa:Address>urn:uuid:{self.camera.uuid}</wsa:Address>
+                    <wsa:Address>urn:uuid:{identity["uuid"]}</wsa:Address>
                 </wsa:EndpointReference>
                 <d:Types>dn:NetworkVideoTransmitter</d:Types>
-                <d:Scopes>onvif://www.onvif.org/type/NetworkVideoTransmitter onvif://www.onvif.org/name/{self.camera.name.replace(' ', '_')}</d:Scopes>
-                <d:XAddrs>http://{local_ip}:{self.camera.onvif_port}/</d:XAddrs>
+                <d:Scopes>{escape(discovery_scopes)}</d:Scopes>
+                <d:XAddrs>http://{local_ip}:{self.camera.onvif_port}/onvif/device_service</d:XAddrs>
                 <d:MetadataVersion>1</d:MetadataVersion>
             </d:ProbeMatch>
         </d:ProbeMatches>
@@ -549,21 +552,21 @@ class ONVIFService:
         self._discovery_thread = None
 
     def _handle_get_device_info(self):
-        """Handle GetDeviceInformation request"""
+        """Return the same persisted identity used by discovery and scopes."""
+        identity = self.camera.get_identity_manifest()
         soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
                    xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
     <SOAP-ENV:Body>
         <tds:GetDeviceInformationResponse>
-            <tds:Manufacturer></tds:Manufacturer>
-            <tds:Model>ONVIF {self.camera.name}</tds:Model>
-            <tds:FirmwareVersion>1.0.0</tds:FirmwareVersion>
-            <tds:SerialNumber>{self.camera.mac_address.replace(':', '').upper()}</tds:SerialNumber>
-            <tds:HardwareId>{self.camera.mac_address.replace(':', '').upper()}</tds:HardwareId>
+            <tds:Manufacturer>{escape(identity["manufacturer"])}</tds:Manufacturer>
+            <tds:Model>{escape(identity["model"])}</tds:Model>
+            <tds:FirmwareVersion>{escape(identity["firmwareVersion"])}</tds:FirmwareVersion>
+            <tds:SerialNumber>{escape(identity["serialNumber"])}</tds:SerialNumber>
+            <tds:HardwareId>{escape(identity["hardwareId"])}</tds:HardwareId>
         </tds:GetDeviceInformationResponse>
     </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>"""
-        
         return Response(soap_response, mimetype='application/soap+xml')
 
     def _handle_get_device_service_capabilities(self):
@@ -1213,21 +1216,16 @@ class ONVIFService:
         return Response(soap_response, mimetype='application/soap+xml')
 
     def _handle_get_scopes(self):
-        """Handle GetScopes request with unique device markers"""
-        scopes = [
-            "onvif://www.onvif.org/type/NetworkVideoTransmitter",
-            f"onvif://www.onvif.org/name/{self.camera.name.replace(' ', '_')}",
-            f"onvif://www.onvif.org/hardware/{self.camera.mac_address.replace(':', '').upper()}",
-            f"onvif://www.onvif.org/location/Home"
-        ]
-        
-        scope_xml = ""
-        for s in scopes:
-            scope_xml += f"""
+        """Return exactly the fixed scopes advertised through WS-Discovery."""
+        scopes = self.camera.get_identity_manifest()["scopes"]
+        scope_xml = "".join(
+            f"""
             <tds:Scopes>
                 <tt:ScopeDef>Fixed</tt:ScopeDef>
-                <tt:ScopeItem>{s}</tt:ScopeItem>
+                <tt:ScopeItem>{escape(scope)}</tt:ScopeItem>
             </tds:Scopes>"""
+            for scope in scopes
+        )
 
         soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
@@ -1238,7 +1236,6 @@ class ONVIFService:
         </tds:GetScopesResponse>
     </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>"""
-        
         return Response(soap_response, mimetype='application/soap+xml')
 
     def _get_events_wsdl(self):
