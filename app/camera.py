@@ -60,9 +60,20 @@ class ThreadPoolWSGIServer(ThreadedWSGIServer):
             self.shutdown_request(request)
     
     def shutdown(self):
-        """Shutdown the server and thread pool"""
-        self.executor.shutdown(wait=True)
-        super().shutdown()
+        """Stop accepting requests before releasing worker resources.
+
+        The old order waited for the worker pool first. A long-polling ONVIF
+        request could therefore keep shutdown blocked while the listening
+        socket remained open, racing a camera restart for the same port.
+        """
+        try:
+            super().shutdown()
+        finally:
+            try:
+                super().server_close()
+            finally:
+                if getattr(self, 'executor', None):
+                    self.executor.shutdown(wait=False, cancel_futures=True)
 
 class RTSPFrameGrabber:
     def __init__(self, rtsp_url):
@@ -265,6 +276,8 @@ class VirtualONVIFCamera:
         self.flask_app = None
         self.flask_thread = None
         self.onvif_service = None
+        self.server = None
+        self._lifecycle_lock = threading.RLock()
         self._keepalive_running = False
         self._keepalive_thread = None
         
@@ -301,43 +314,57 @@ class VirtualONVIFCamera:
         return get_local_ip()
         
     def start(self):
-        """Mark camera as running and start ONVIF service"""
-        self.status = "running"
-        
-        # Setup Virtual NIC if requested (Linux only)
-        if self.use_virtual_nic and self.network_mgr:
-            # VNIC name must be <= 15 chars on Linux.
-            # Use UUID (stripped of hyphens) to ensure uniqueness regardless of camera name.
-            vnic_name = f"vnic_{self.uuid.replace('-', '')[:10]}"
-            if self.network_mgr.create_macvlan(self.parent_interface, vnic_name, self.nic_mac):
-                self.assigned_ip = self.network_mgr.setup_ip(
-                    vnic_name, 
-                    self.ip_mode, 
-                    self.static_ip, 
-                    self.netmask, 
-                    self.gateway
+        """Start one camera only after any previous runtime has fully released."""
+        with self._lifecycle_lock:
+            if self.status == "running" and self.server and self.flask_thread and self.flask_thread.is_alive():
+                return
+
+            if self.flask_thread and self.flask_thread.is_alive():
+                raise RuntimeError(
+                    f"Cannot start {self.name}: previous ONVIF server thread is still running"
                 )
-            # Give the system and router a moment to stabilize
-            time.sleep(0.5)
-            if self.assigned_ip:
-                self._start_keepalive(vnic_name)
-        
-        self._start_onvif_service()
 
-        # Verify the configured resolution/codec against the real source streams
-        threading.Thread(target=self._probe_source_streams, daemon=True,
-                         name=f"probe-{self.path_name}").start()
+            self.status = "running"
+            try:
+                # Setup Virtual NIC if requested (Linux only)
+                if self.use_virtual_nic and self.network_mgr:
+                    # VNIC name must be <= 15 chars on Linux.
+                    # Use UUID (stripped of hyphens) to ensure uniqueness regardless of camera name.
+                    vnic_name = f"vnic_{self.uuid.replace('-', '')[:10]}"
+                    if self.network_mgr.create_macvlan(self.parent_interface, vnic_name, self.nic_mac):
+                        self.assigned_ip = self.network_mgr.setup_ip(
+                            vnic_name,
+                            self.ip_mode,
+                            self.static_ip,
+                            self.netmask,
+                            self.gateway
+                        )
+                    # Give the system and router a moment to stabilize
+                    time.sleep(0.5)
+                    if self.assigned_ip:
+                        self._start_keepalive(vnic_name)
 
-        if self.enable_event_forwarding:
-            if self.event_source == 'ai':
-                self.onvif_subscription_active = False
-                self.onvif_subscription_error = "Using local AI event detection; ONVIF camera subscription inactive."
-                self.start_ai_detection()
-            else:
-                self.start_event_forwarding()
-        else:
-            self.onvif_subscription_active = False
-            self.onvif_subscription_error = "Event forwarding is disabled in settings."
+                self._start_onvif_service()
+
+                # Verify the configured resolution/codec against the real source streams
+                threading.Thread(target=self._probe_source_streams, daemon=True,
+                                 name=f"probe-{self.path_name}").start()
+
+                if self.enable_event_forwarding:
+                    if self.event_source == 'ai':
+                        self.onvif_subscription_active = False
+                        self.onvif_subscription_error = "Using local AI event detection; ONVIF camera subscription inactive."
+                        self.start_ai_detection()
+                    else:
+                        self.start_event_forwarding()
+                else:
+                    self.onvif_subscription_active = False
+                    self.onvif_subscription_error = "Event forwarding is disabled in settings."
+            except Exception:
+                # Do not leave a half-started camera marked running. The bounded
+                # cleanup path is safe to call recursively because this is an RLock.
+                self.stop()
+                raise
         
     def _probe_source_streams(self):
         """Probe the real source streams and flag mismatches vs configured values.
@@ -395,43 +422,65 @@ class VirtualONVIFCamera:
             print(f"  [Stream Check] Probe failed for {self.name}: {e}")
 
     def stop(self):
-        """Mark camera as stopped, shutdown ONVIF service, and cleanup networking"""
-        self.status = "stopped"
-        if self.enable_event_forwarding:
-            self.stop_event_forwarding()
-            self.stop_ai_detection()
-        
-        # Stop the ONVIF WSGI server safely
-        if hasattr(self, 'server') and self.server:
-            try:
-                import threading
+        """Synchronously quiesce the camera before its identity/port can restart.
+
+        Camera edits used to launch WSGI shutdown in a daemon thread and return
+        immediately. update_camera() could then call start() while the old
+        flask_thread was still alive, leaving the stale ONVIF/event runtime in
+        place. This stop path deliberately waits for bounded teardown.
+        """
+        with self._lifecycle_lock:
+            self.status = "stopped"
+
+            if self.enable_event_forwarding:
+                self.stop_event_forwarding()
+                self.stop_ai_detection()
+
+            if self.onvif_service:
+                try:
+                    self.onvif_service.stop_discovery_service()
+                except Exception as e:
+                    print(f"  Error stopping WS-Discovery for {self.name}: {e}")
+
+            # Stop accepting ONVIF requests and release the listener before
+            # returning to update_camera()/start().
+            if self.server:
                 srv = self.server
-                def _safe_shutdown():
-                    try:
-                        srv.shutdown()
-                        srv.server_close()
-                        if hasattr(srv, 'executor') and srv.executor:
-                            srv.executor.shutdown(wait=False)
-                    except Exception as shutdown_err:
-                        print(f"  Error during background socket shutdown for {self.name}: {shutdown_err}")
-                threading.Thread(target=_safe_shutdown, daemon=True).start()
-                self.server = None
-            except Exception as e:
-                print(f"  Error shutting down ONVIF server for {self.name}: {e}")
-        
-        # Cleanup Virtual NIC
-        if self.use_virtual_nic and self.network_mgr:
-            self._stop_keepalive()
-            vnic_name = f"vnic_{self.uuid.replace('-', '')[:10]}"
-            self.network_mgr.remove_interface(vnic_name)
-            self.assigned_ip = None
+                try:
+                    srv.shutdown()
+                except Exception as e:
+                    print(f"  Error shutting down ONVIF server for {self.name}: {e}")
+                finally:
+                    self.server = None
+
+            if self.flask_thread:
+                try:
+                    self.flask_thread.join(timeout=5.0)
+                except Exception:
+                    pass
+                if self.flask_thread.is_alive():
+                    raise RuntimeError(
+                        f"ONVIF server thread for {self.name} did not stop within 5 seconds"
+                    )
+                self.flask_thread = None
+
+            self.flask_app = None
+            self.onvif_service = None
+
+            # Cleanup Virtual NIC only after listeners/threads are gone.
+            if self.use_virtual_nic and self.network_mgr:
+                self._stop_keepalive()
+                vnic_name = f"vnic_{self.uuid.replace('-', '')[:10]}"
+                self.network_mgr.remove_interface(vnic_name)
+                self.assigned_ip = None
         
     def _start_onvif_service(self):
         """Start the ONVIF web service"""
-        # Check if already running
+        # A stale listener is a lifecycle error, not a successful start.
         if self.flask_thread and self.flask_thread.is_alive():
-            print(f"  ONVIF service already running on port {self.onvif_port}")
-            return
+            raise RuntimeError(
+                f"Previous ONVIF service for {self.name} is still running on port {self.onvif_port}"
+            )
             
         self.onvif_service = ONVIFService(self)
         app = self.onvif_service.create_app()
@@ -727,18 +776,42 @@ class VirtualONVIFCamera:
                     break
                 time.sleep(1.0)
 
+    def _event_forwarding_wait(self, seconds):
+        """Interruptible replacement for long reconnect sleeps."""
+        deadline = time.monotonic() + seconds
+        while self._event_forwarding_running and time.monotonic() < deadline:
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
     def start_event_forwarding(self):
-        """Start ONVIF Event Forwarder background thread"""
+        """Start exactly one ONVIF Event Forwarder background thread."""
+        if self._event_forwarding_thread and self._event_forwarding_thread.is_alive():
+            raise RuntimeError(
+                f"ONVIF event forwarder for {self.name} is already running"
+            )
+
         self._event_forwarding_running = True
-        self._event_forwarding_thread = threading.Thread(target=self._event_forwarding_loop, daemon=True)
+        self._event_forwarding_thread = threading.Thread(
+            target=self._event_forwarding_loop,
+            daemon=True,
+            name=f"onvif-events-{self.path_name}"
+        )
         self._event_forwarding_thread.start()
         print(f"  [Camera ({self.name})] ONVIF event forwarder thread started.")
 
     def stop_event_forwarding(self):
-        """Stop ONVIF Event Forwarder background thread"""
+        """Stop and join the ONVIF Event Forwarder before a replacement starts."""
         self._event_forwarding_running = False
         self.onvif_subscription_active = False
         self.onvif_subscription_error = "Event forwarding stopped"
+
+        thread = self._event_forwarding_thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=8.0)
+            if thread.is_alive():
+                raise RuntimeError(
+                    f"ONVIF event forwarder for {self.name} did not stop within 8 seconds"
+                )
+        self._event_forwarding_thread = None
         print(f"  [Camera ({self.name})] ONVIF event forwarder thread stopped.")
 
     def _event_forwarding_loop(self):
@@ -762,7 +835,7 @@ class VirtualONVIFCamera:
                 port = getattr(self, 'physical_onvif_port', 80) or 80
             except Exception as e:
                 print(f"  [ONVIF Event Forwarder ({self.name})] Error parsing stream URL: {e}")
-                time.sleep(10)
+                self._event_forwarding_wait(10)
                 continue
                 
             print(f"  [ONVIF Event Forwarder ({self.name})] Connecting to camera events at {host}:{port}...")
@@ -827,7 +900,7 @@ class VirtualONVIFCamera:
                             'Content-Type': 'application/soap+xml; charset=utf-8; action="http://www.onvif.org/ver10/events/wsdl/EventPortType/CreatePullPointSubscriptionRequest"',
                         }
                         
-                        resp = requests.post(events_xaddr, data=sub_payload, headers=sub_headers, timeout=15)
+                        resp = requests.post(events_xaddr, data=sub_payload, headers=sub_headers, timeout=(3, 7))
                         if resp.status_code == 200:
                             sub_root = ET.fromstring(resp.text)
                             addr_node = sub_root.find('.//{*}SubscriptionReference/{*}Address')
@@ -861,7 +934,7 @@ class VirtualONVIFCamera:
                     if subscription_limit_hit:
                         self.onvif_subscription_error = "Maximum concurrent ONVIF subscription limit reached on physical camera."
                         print(f"  [ONVIF Event Forwarder ({self.name})] Camera '{self.name}' is at its max concurrent ONVIF subscription limit. Another client is using the slot. Waiting 30s for a slot to free up...")
-                        time.sleep(30)
+                        self._event_forwarding_wait(30)
                         continue
                     self.onvif_subscription_error = f"Subscription creation failed: {last_err}"
                     raise Exception(f"Subscription creation failed across all auth modes. Last error: {last_err}")
@@ -892,7 +965,7 @@ class VirtualONVIFCamera:
                         }
                         
                         try:
-                            resp = requests.post(pullpoint_addr, data=payload, headers=headers, timeout=15)
+                            resp = requests.post(pullpoint_addr, data=payload, headers=headers, timeout=(3, 7))
                             if resp.status_code == 200:
                                 events_list = parse_pull_messages_response(resp.text)
                                 for evt in events_list:
@@ -966,7 +1039,7 @@ class VirtualONVIFCamera:
                                 'Content-Type': 'application/soap+xml; charset=utf-8; action="http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest"',
                             }
                             # Send unsubscribe to pullpoint_addr
-                            requests.post(pullpoint_addr, data=unsub_payload, headers=unsub_headers, timeout=5)
+                            requests.post(pullpoint_addr, data=unsub_payload, headers=unsub_headers, timeout=(2, 3))
                             print(f"  [ONVIF Event Forwarder ({self.name})] Sent Unsubscribe to camera '{self.name}' to release subscription slot.")
                         except Exception as unsub_err:
                             print(f"  [ONVIF Event Forwarder ({self.name})] Failed to unsubscribe from camera '{self.name}': {unsub_err}")
@@ -975,7 +1048,7 @@ class VirtualONVIFCamera:
                 self.onvif_subscription_active = False
                 self.onvif_subscription_error = f"ONVIF connection failed: {conn_err}"
                 print(f"  [ONVIF Event Forwarder ({self.name})] ONVIF events connection failed: {conn_err}. Retrying in 10s...")
-                time.sleep(10)
+                self._event_forwarding_wait(10)
 
     def start_ai_detection(self):
         """Start local AI event detection background thread"""
