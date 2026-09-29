@@ -26,6 +26,7 @@ from .device_identity import (
 from .linux_network import LinuxNetworkManager
 from .utils import get_local_ip
 from .ai_device import get_shared_model as get_shared_ai_model, AI_INFERENCE_LOCK as _AI_INFERENCE_LOCK
+from .analytics_events import AnalyticsStateAggregator, to_onvif_event, topic_to_type
 
 
 class ThreadPoolWSGIServer(ThreadedWSGIServer):
@@ -234,6 +235,7 @@ class VirtualONVIFCamera:
         self._event_forwarding_thread = None
         self._event_forwarding_running = False
         self.event_logs = []
+        self.analytics_state = AnalyticsStateAggregator()
         
         # AI Event Detection settings
         self.event_source = config.get('eventSource', 'onvif')  # 'onvif' or 'ai'
@@ -677,6 +679,7 @@ class VirtualONVIFCamera:
             'onvifActiveSubscriptions': len(self.onvif_service.subscriptions) if self.onvif_service else 0,
             'onvifSubscribersIPs': [sub.client_ip for sub in self.onvif_service.subscriptions.values() if sub.client_ip] if self.onvif_service else [],
             'onvifEventHealth': self.onvif_service.event_health() if self.onvif_service else None,
+            'analyticsState': self.analytics_state.health(),
             'aiInferenceCount': self.ai_inference_count,
             'aiDetectionCount': self.ai_detection_count,
             'aiLastInferenceTime': self.ai_last_inference_time,
@@ -812,6 +815,32 @@ class VirtualONVIFCamera:
                     break
                 time.sleep(1.0)
 
+    def publish_analytics_event(self, event):
+        """Aggregate one producer event and publish only ONVIF property transitions."""
+        payload = dict(event or {})
+        payload['camera'] = payload.get('camera') or self.name
+        aggregate = self.analytics_state.apply(payload)
+        if not aggregate or not self.onvif_service:
+            return None
+
+        onvif_event = to_onvif_event(aggregate)
+        onvif_event['camera_id'] = self.id
+        onvif_event['camera_name'] = self.name
+        return self.onvif_service.publish_event(onvif_event)
+
+    def clear_analytics_source(self, source):
+        """Clear one producer without cancelling properties still held by others."""
+        published = []
+        for aggregate in self.analytics_state.clear_source(source, camera=self.name):
+            if self.onvif_service:
+                onvif_event = to_onvif_event(aggregate)
+                onvif_event['camera_id'] = self.id
+                onvif_event['camera_name'] = self.name
+                result = self.onvif_service.publish_event(onvif_event)
+                if result:
+                    published.append(result)
+        return published
+
     def _event_forwarding_wait(self, seconds):
         """Interruptible replacement for long reconnect sleeps."""
         deadline = time.monotonic() + seconds
@@ -848,6 +877,7 @@ class VirtualONVIFCamera:
                     f"ONVIF event forwarder for {self.name} did not stop within 8 seconds"
                 )
         self._event_forwarding_thread = None
+        self.clear_analytics_source('physical_onvif')
         print(f"  [Camera ({self.name})] ONVIF event forwarder thread stopped.")
 
     def _event_forwarding_loop(self):
@@ -1021,9 +1051,25 @@ class VirtualONVIFCamera:
                                     if len(self.event_logs) > 50:
                                         self.event_logs.pop(0)
                                         
-                                    # Publish through the retained/property-aware PullPoint engine.
+                                    # Known motion/smart properties participate in the
+                                    # multi-producer OR state; unfamiliar ONVIF topics are
+                                    # still forwarded unchanged for Tony compatibility.
                                     if self.onvif_service:
-                                        self.onvif_service.publish_event(evt)
+                                        event_type = topic_to_type(evt.get('topic'))
+                                        if event_type:
+                                            self.publish_analytics_event({
+                                                'source': 'physical_onvif',
+                                                'camera': self.name,
+                                                'type': event_type,
+                                                'active': evt.get('value'),
+                                                'timestamp': evt.get('timestamp'),
+                                                'metadata': {
+                                                    'physicalTopic': evt.get('topic'),
+                                                    'physicalSource': evt.get('source') or {},
+                                                },
+                                            })
+                                        else:
+                                            self.onvif_service.publish_event(evt)
                                                     
                                     # Log globally (limit to 200)
                                     if self.manager:
@@ -1093,6 +1139,7 @@ class VirtualONVIFCamera:
                 self._ai_thread.join(timeout=2.0)
             except Exception:
                 pass
+        self.clear_analytics_source('local_ai')
         print(f"  [Camera ({self.name})] Local AI detection thread stopped.")
 
     def _ai_detection_loop(self):
@@ -1508,9 +1555,24 @@ class VirtualONVIFCamera:
                 
             print(f"  [AI Camera ({self.name})] AI Event: {topic} = {val} (Tags: {event_tags}) (Confidences: {confidences})")
             
-            # Publish through the retained/property-aware PullPoint engine.
+            # Local AI shares the same aggregate property state as Frigate
+            # and physical-camera ONVIF forwarding.
             if self.onvif_service:
-                self.onvif_service.publish_event(evt)
+                event_type = topic_to_type(topic)
+                if event_type:
+                    self.publish_analytics_event({
+                        'source': 'local_ai',
+                        'camera': self.name,
+                        'type': event_type,
+                        'active': val,
+                        'timestamp': evt.get('timestamp'),
+                        'metadata': {
+                            'tags': list(event_tags or []),
+                            'confidences': dict(confidences or {}),
+                        },
+                    })
+                else:
+                    self.onvif_service.publish_event(evt)
 
         # 1. Send generic motion event if state has changed
         if not hasattr(self, '_motion_state'):
