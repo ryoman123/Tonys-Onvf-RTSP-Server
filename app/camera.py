@@ -4,7 +4,6 @@ import socket
 import time
 import uuid
 import hashlib
-import queue
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -642,6 +641,7 @@ class VirtualONVIFCamera:
             'onvifSubscriptionError': self.onvif_subscription_error,
             'onvifActiveSubscriptions': len(self.onvif_service.subscriptions) if self.onvif_service else 0,
             'onvifSubscribersIPs': [sub.client_ip for sub in self.onvif_service.subscriptions.values() if sub.client_ip] if self.onvif_service else [],
+            'onvifEventHealth': self.onvif_service.event_health() if self.onvif_service else None,
             'aiInferenceCount': self.ai_inference_count,
             'aiDetectionCount': self.ai_detection_count,
             'aiLastInferenceTime': self.ai_last_inference_time,
@@ -985,17 +985,9 @@ class VirtualONVIFCamera:
                                     if len(self.event_logs) > 50:
                                         self.event_logs.pop(0)
                                         
-                                    # Broadcast to virtual clients
+                                    # Publish through the retained/property-aware PullPoint engine.
                                     if self.onvif_service:
-                                        for sub in list(self.onvif_service.subscriptions.values()):
-                                            try:
-                                                sub.queue.put_nowait(evt)
-                                            except queue.Full:
-                                                try:
-                                                    sub.queue.get_nowait()
-                                                    sub.queue.put_nowait(evt)
-                                                except:
-                                                    pass
+                                        self.onvif_service.publish_event(evt)
                                                     
                                     # Log globally (limit to 200)
                                     if self.manager:
@@ -1451,7 +1443,6 @@ class VirtualONVIFCamera:
     def _trigger_ai_motion(self, is_active, tags, tag_confidences=None, image_bytes=None, license_plate=None):
         """Broadcast motion state from local AI engine to subscribers"""
         from datetime import datetime
-        import queue
 
         def send_evt(topic, data_name, val, event_tags, confidences=None):
             evt = {
@@ -1481,17 +1472,9 @@ class VirtualONVIFCamera:
                 
             print(f"  [AI Camera ({self.name})] AI Event: {topic} = {val} (Tags: {event_tags}) (Confidences: {confidences})")
             
-            # Broadcast to virtual clients
+            # Publish through the retained/property-aware PullPoint engine.
             if self.onvif_service:
-                for sub in list(self.onvif_service.subscriptions.values()):
-                    try:
-                        sub.queue.put_nowait(evt)
-                    except queue.Full:
-                        try:
-                            sub.queue.get_nowait()
-                            sub.queue.put_nowait(evt)
-                        except:
-                            pass
+                self.onvif_service.publish_event(evt)
 
         # 1. Send generic motion event if state has changed
         if not hasattr(self, '_motion_state'):
