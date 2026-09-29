@@ -118,6 +118,31 @@ class ProfileDefinition:
     h264_profile: str
 
 
+def validate_stream_setup(soap_body: str):
+    """Validate the ONVIF StreamSetup used by GetStreamUri.
+
+    The unified bridge supports RTP unicast over RTSP/TCP. Missing setup fields
+    are not silently defaulted because strict clients use faults to distinguish
+    an unsupported transport from a bad profile.
+    """
+    stream_type = extract_request_text(soap_body, "Stream")
+    protocol = extract_request_text(soap_body, "Protocol")
+
+    if not stream_type or not protocol:
+        raise MediaProfileError(
+            "invalid-stream-setup",
+            "StreamSetup requires Stream and Transport/Protocol",
+        )
+
+    if stream_type != "RTP-Unicast" or protocol not in {"RTSP", "TCP"}:
+        raise MediaProfileError(
+            "invalid-stream-setup",
+            f"unsupported StreamSetup: Stream={stream_type}, Protocol={protocol}",
+        )
+
+    return {"stream": stream_type, "protocol": protocol}
+
+
 def profile_definition(camera, kind: str) -> ProfileDefinition:
     cam_id = camera.id
     if kind not in {"main", "sub"}:
