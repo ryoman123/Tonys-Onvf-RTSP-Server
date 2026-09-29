@@ -514,7 +514,16 @@ def create_web_app(manager):
                 event_source=data.get('eventSource', 'onvif'),
                 ai_targets=data.get('aiTargets'),
                 ai_model=data.get('aiModel', AI_DEFAULT_MODEL),
-                send_smart_onvif_topics=data.get('sendSmartOnvifTopics', True)
+                send_smart_onvif_topics=data.get('sendSmartOnvifTopics', True),
+                identity=data.get('identity') or {
+                    'manufacturer': data.get('manufacturer'),
+                    'model': data.get('model'),
+                    'firmwareVersion': data.get('firmwareVersion'),
+                    'serialNumber': data.get('serialNumber'),
+                    'hardwareId': data.get('hardwareId'),
+                    'location': data.get('location'),
+                    'discoveryName': data.get('discoveryName'),
+                },
             )
             if camera:
                 camera.ai_motion_detection_enabled = data.get('aiMotionDetectionEnabled', True)
@@ -587,7 +596,16 @@ def create_web_app(manager):
                 event_source=data.get('eventSource', 'onvif'),
                 ai_targets=data.get('aiTargets'),
                 ai_model=data.get('aiModel', AI_DEFAULT_MODEL),
-                send_smart_onvif_topics=data.get('sendSmartOnvifTopics', True)
+                send_smart_onvif_topics=data.get('sendSmartOnvifTopics', True),
+                identity=data.get('identity') or {
+                    'manufacturer': data.get('manufacturer'),
+                    'model': data.get('model'),
+                    'firmwareVersion': data.get('firmwareVersion'),
+                    'serialNumber': data.get('serialNumber'),
+                    'hardwareId': data.get('hardwareId'),
+                    'location': data.get('location'),
+                    'discoveryName': data.get('discoveryName'),
+                },
             )
             if camera:
                 camera.ai_motion_detection_enabled = data.get('aiMotionDetectionEnabled', True)
