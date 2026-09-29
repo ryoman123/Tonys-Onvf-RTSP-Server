@@ -11,6 +11,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Running "python tools/acceptance_check.py" sets sys.path[0] to tools/.
+# Add the repository root so the application package resolves without install.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from app.runtime_health import build_identity_manifest, evaluate_acceptance
 
 
