@@ -985,17 +985,9 @@ class VirtualONVIFCamera:
                                     if len(self.event_logs) > 50:
                                         self.event_logs.pop(0)
                                         
-                                    # Broadcast to virtual clients
+                                    # Publish through the retained/property-aware PullPoint engine.
                                     if self.onvif_service:
-                                        for sub in list(self.onvif_service.subscriptions.values()):
-                                            try:
-                                                sub.queue.put_nowait(evt)
-                                            except queue.Full:
-                                                try:
-                                                    sub.queue.get_nowait()
-                                                    sub.queue.put_nowait(evt)
-                                                except:
-                                                    pass
+                                        self.onvif_service.publish_event(evt)
                                                     
                                     # Log globally (limit to 200)
                                     if self.manager:
@@ -1481,17 +1473,9 @@ class VirtualONVIFCamera:
                 
             print(f"  [AI Camera ({self.name})] AI Event: {topic} = {val} (Tags: {event_tags}) (Confidences: {confidences})")
             
-            # Broadcast to virtual clients
+            # Publish through the retained/property-aware PullPoint engine.
             if self.onvif_service:
-                for sub in list(self.onvif_service.subscriptions.values()):
-                    try:
-                        sub.queue.put_nowait(evt)
-                    except queue.Full:
-                        try:
-                            sub.queue.get_nowait()
-                            sub.queue.put_nowait(evt)
-                        except:
-                            pass
+                self.onvif_service.publish_event(evt)
 
         # 1. Send generic motion event if state has changed
         if not hasattr(self, '_motion_state'):
