@@ -30,6 +30,7 @@ from .media_profile import (
     profile_kind_from_token,
     render_get_profile_response,
     render_get_profiles_response,
+    render_video_encoder_configuration,
     validate_stream_setup,
 )
 from .event_engine import (
@@ -896,52 +897,26 @@ class ONVIFService:
         return Response(soap_response, mimetype='application/soap+xml')
 
     def _handle_get_video_encoder_configs(self):
-        """Handle GetVideoEncoderConfigurations request"""
-        cam_id = self.camera.id
+        """Return all live VideoEncoderConfigurations with truthful codecs."""
+        definitions = [profile_definition(self.camera, 'main')]
+        if not getattr(self.camera, 'disable_substream', False):
+            definitions.append(profile_definition(self.camera, 'sub'))
+
+        configurations = "".join(
+            render_video_encoder_configuration(
+                definition,
+                response_element="trt:Configurations",
+            )
+            for definition in definitions
+        )
+
         soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
                    xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
                    xmlns:tt="http://www.onvif.org/ver10/schema">
     <SOAP-ENV:Body>
         <trt:GetVideoEncoderConfigurationsResponse>
-            <trt:Configurations token="VideoEncoderMain_{cam_id}">
-                <tt:Name>Main Video Encoder</tt:Name>
-                <tt:UseCount>1</tt:UseCount>
-                <tt:Encoding>H264</tt:Encoding>
-                <tt:Resolution>
-                    <tt:Width>{self.camera.main_width}</tt:Width>
-                    <tt:Height>{self.camera.main_height}</tt:Height>
-                </tt:Resolution>
-                <tt:Quality>5</tt:Quality>
-                <tt:RateControl>
-                    <tt:FrameRateLimit>{self.camera.main_framerate}</tt:FrameRateLimit>
-                    <tt:EncodingInterval>1</tt:EncodingInterval>
-                    <tt:BitrateLimit>4096</tt:BitrateLimit>
-                </tt:RateControl>
-                <tt:H264>
-                    <tt:GovLength>{self.camera.main_framerate}</tt:GovLength>
-                    <tt:H264Profile>Main</tt:H264Profile>
-                </tt:H264>
-            </trt:Configurations>
-            <trt:Configurations token="VideoEncoderSub_{cam_id}">
-                <tt:Name>Sub Video Encoder</tt:Name>
-                <tt:UseCount>1</tt:UseCount>
-                <tt:Encoding>H264</tt:Encoding>
-                <tt:Resolution>
-                    <tt:Width>{self.camera.sub_width}</tt:Width>
-                    <tt:Height>{self.camera.sub_height}</tt:Height>
-                </tt:Resolution>
-                <tt:Quality>3</tt:Quality>
-                <tt:RateControl>
-                    <tt:FrameRateLimit>{self.camera.sub_framerate}</tt:FrameRateLimit>
-                    <tt:EncodingInterval>1</tt:EncodingInterval>
-                    <tt:BitrateLimit>1024</tt:BitrateLimit>
-                </tt:RateControl>
-                <tt:H264>
-                    <tt:GovLength>{self.camera.sub_framerate}</tt:GovLength>
-                    <tt:H264Profile>Baseline</tt:H264Profile>
-                </tt:H264>
-            </trt:Configurations>
+            {configurations}
         </trt:GetVideoEncoderConfigurationsResponse>
     </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>"""
@@ -1044,35 +1019,22 @@ class ONVIFService:
         except MediaProfileError as error:
             return self._media_profile_fault(error)
 
+        configuration = render_video_encoder_configuration(
+            definition,
+            response_element="trt:Configuration",
+        )
         soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
                    xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
                    xmlns:tt="http://www.onvif.org/ver10/schema">
     <SOAP-ENV:Body>
         <trt:GetVideoEncoderConfigurationResponse>
-            <trt:Configuration token="{definition.video_encoder_token}">
-                <tt:Name>{definition.video_encoder_name}</tt:Name>
-                <tt:UseCount>1</tt:UseCount>
-                <tt:Encoding>H264</tt:Encoding>
-                <tt:Resolution>
-                    <tt:Width>{definition.width}</tt:Width>
-                    <tt:Height>{definition.height}</tt:Height>
-                </tt:Resolution>
-                <tt:Quality>{definition.quality}</tt:Quality>
-                <tt:RateControl>
-                    <tt:FrameRateLimit>{definition.framerate}</tt:FrameRateLimit>
-                    <tt:EncodingInterval>1</tt:EncodingInterval>
-                    <tt:BitrateLimit>{definition.bitrate}</tt:BitrateLimit>
-                </tt:RateControl>
-                <tt:H264>
-                    <tt:GovLength>{definition.framerate}</tt:GovLength>
-                    <tt:H264Profile>{definition.h264_profile}</tt:H264Profile>
-                </tt:H264>
-            </trt:Configuration>
+            {configuration}
         </trt:GetVideoEncoderConfigurationResponse>
     </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>"""
         return Response(soap_response, mimetype='application/soap+xml')
+
     def _handle_get_video_encoder_config_options(self):
         """Return encoder options scoped by exact profile/configuration tokens."""
         soap_body = request.data.decode('utf-8')
@@ -1103,35 +1065,31 @@ class ONVIFService:
             return self._media_profile_fault(error)
 
         if selected_kind:
-            definition = profile_definition(self.camera, selected_kind)
-            resolutions = [(definition.width, definition.height)]
-            max_fps = definition.framerate
+            definitions = [profile_definition(self.camera, selected_kind)]
         else:
             definitions = [profile_definition(self.camera, 'main')]
             if not getattr(self.camera, 'disable_substream', False):
                 definitions.append(profile_definition(self.camera, 'sub'))
-            resolutions = [(item.width, item.height) for item in definitions]
-            max_fps = max(item.framerate for item in definitions)
 
-        res_xml = "".join(
-            f"""
+        h264_definitions = [
+            item for item in definitions
+            if item.encoding == 'H264'
+        ]
+        h264_xml = ""
+        if h264_definitions:
+            resolutions = [
+                (item.width, item.height)
+                for item in h264_definitions
+            ]
+            max_fps = max(item.framerate for item in h264_definitions)
+            res_xml = "".join(
+                f"""
                     <tt:ResolutionsAvailable>
                         <tt:Width>{w}</tt:Width>
                         <tt:Height>{h}</tt:Height>
                     </tt:ResolutionsAvailable>""" for w, h in resolutions
-        )
-
-        soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
-                   xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
-                   xmlns:tt="http://www.onvif.org/ver10/schema">
-    <SOAP-ENV:Body>
-        <trt:GetVideoEncoderConfigurationOptionsResponse>
-            <trt:Options>
-                <tt:QualityRange>
-                    <tt:Min>1</tt:Min>
-                    <tt:Max>5</tt:Max>
-                </tt:QualityRange>
+            )
+            h264_xml = f"""
                 <tt:H264>{res_xml}
                     <tt:GovLengthRange>
                         <tt:Min>1</tt:Min>
@@ -1147,12 +1105,25 @@ class ONVIFService:
                     </tt:EncodingIntervalRange>
                     <tt:H264ProfilesSupported>Baseline</tt:H264ProfilesSupported>
                     <tt:H264ProfilesSupported>Main</tt:H264ProfilesSupported>
-                </tt:H264>
+                </tt:H264>"""
+
+        soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+                   xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+                   xmlns:tt="http://www.onvif.org/ver10/schema">
+    <SOAP-ENV:Body>
+        <trt:GetVideoEncoderConfigurationOptionsResponse>
+            <trt:Options>
+                <tt:QualityRange>
+                    <tt:Min>1</tt:Min>
+                    <tt:Max>5</tt:Max>
+                </tt:QualityRange>{h264_xml}
             </trt:Options>
         </trt:GetVideoEncoderConfigurationOptionsResponse>
     </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>"""
         return Response(soap_response, mimetype='application/soap+xml')
+
     def _handle_get_video_source_config(self):
         """Handle GetVideoSourceConfiguration (singular) — there is only one source."""
         cam_id = self.camera.id
