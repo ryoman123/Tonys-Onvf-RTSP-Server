@@ -101,6 +101,11 @@ def main():
     if not manager.mediamtx.start(manager.cameras, rtsp_port=rtsp_port, rtsp_username=rtsp_username, rtsp_password=rtsp_password, grid_fusion=manager.get_grid_fusion(), debug_mode=debug_mode, advanced_settings=advanced_settings, web_port=web_ui_port):
         print("\nFailed to start MediaMTX. Exiting...")
         sys.exit(1)
+
+    # Start optional external analytics only after the virtual camera runtime is
+    # established. Producers dynamically resolve cameras, so manually started
+    # cameras can begin receiving Frigate events later without restarting MQTT.
+    manager.start_external_analytics()
     
     web_app = create_web_app(manager)
     
@@ -168,6 +173,8 @@ def main():
         print("\n\nShutdown requested (KeyboardInterrupt)...")
         
     # Perform clean shutdown
+    print("Stopping external analytics...")
+    manager.stop_external_analytics()
     print("Stopping MediaMTX...")
     manager.mediamtx.stop()
     print("Stopping all cameras...")
