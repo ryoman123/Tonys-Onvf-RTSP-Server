@@ -155,12 +155,12 @@ def profile_definition(camera, kind: str) -> ProfileDefinition:
     if kind == "main":
         return ProfileDefinition(
             kind="main",
-            profile_token=f"mainStream_{cam_id}",
+            profile_token=getattr(camera, 'media_tokens', {}).get('mainProfile', f"mainStream_{cam_id}"),
             profile_name="mainStream",
             video_source_token=f"VideoSource_{cam_id}",
             video_source_config_token=f"VideoSource_{cam_id}",
             video_source_config_name="Video Source",
-            video_encoder_token=f"VideoEncoderMain_{cam_id}",
+            video_encoder_token=getattr(camera, 'media_tokens', {}).get('mainEncoder', f"VideoEncoderMain_{cam_id}"),
             video_encoder_name="Main Video Encoder",
             audio_source_token=f"AudioSource_{cam_id}",
             audio_source_config_token=f"AudioSourceConfig_Main_{cam_id}",
@@ -178,12 +178,12 @@ def profile_definition(camera, kind: str) -> ProfileDefinition:
 
     return ProfileDefinition(
         kind="sub",
-        profile_token=f"subStream_{cam_id}",
+        profile_token=getattr(camera, 'media_tokens', {}).get('subProfile', f"subStream_{cam_id}"),
         profile_name="subStream",
         video_source_token=f"VideoSource_{cam_id}",
         video_source_config_token=f"VideoSource_{cam_id}",
         video_source_config_name="Video Source",
-        video_encoder_token=f"VideoEncoderSub_{cam_id}",
+        video_encoder_token=getattr(camera, 'media_tokens', {}).get('subEncoder', f"VideoEncoderSub_{cam_id}"),
         video_encoder_name="Sub Video Encoder",
         audio_source_token=f"AudioSource_{cam_id}",
         audio_source_config_token=f"AudioSourceConfig_Sub_{cam_id}",

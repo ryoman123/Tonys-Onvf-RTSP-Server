@@ -72,11 +72,13 @@ def camera_readiness(camera):
         "identity": identity,
         "streams": {
             "main": {
+                "encoding": camera.main_encoding if hasattr(camera, 'main_encoding') else None,
                 "width": camera.main_width,
                 "height": camera.main_height,
                 "framerate": camera.main_framerate,
             },
             "sub": None if getattr(camera, "disable_substream", False) else {
+                "encoding": camera.sub_encoding if hasattr(camera, 'sub_encoding') else None,
                 "width": camera.sub_width,
                 "height": camera.sub_height,
                 "framerate": camera.sub_framerate,
@@ -132,6 +134,7 @@ def build_readiness(manager, *, boot_id=None):
     mediamtx_running = _mediamtx_running(manager)
     core_ready = (
         mediamtx_running
+        and bool(cameras)
         and all(item["ready"] for item in required_for_core)
         and not duplicate_identity
     )
@@ -260,6 +263,9 @@ def evaluate_acceptance(
             failures.append(f"manifest camera '{name}' is missing")
             continue
         identity = actual.get("identity") or {}
+        for field in ('effectiveIp', 'onvifPort', 'rtspPort'):
+            if field in expected and actual.get(field) != expected[field]:
+                failures.append(f"{name}: {field} differs from identity manifest")
         for field in ("uuid", "mac", "serialNumber", "hardwareId", "fingerprint"):
             expected_value = expected.get(field)
             if expected_value is None:

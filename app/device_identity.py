@@ -56,6 +56,12 @@ def generated_mac_from_uuid(device_uuid: str) -> str:
     return ":".join(f"{value:02x}" for value in octets)
 
 
+def virtual_nic_name(device_uuid: str) -> str:
+    """Use the entire UUID; legacy MAC-derived UUIDs share their first ten digits."""
+    canonical = normalize_uuid(device_uuid)
+    return "vnic_" + hashlib.sha256(canonical.encode("ascii")).hexdigest()[:10]
+
+
 def _identity_text(value, field, default):
     if value is None:
         return default

@@ -12,6 +12,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -158,6 +159,7 @@ def migrate(source_config, *, parent_interface, onvif_username, onvif_password,
         firmware = str(raw.get("firmware_version") or "1.0").strip()
 
         camera_uuid = str(raw.get("uuid") or legacy_uuid_from_mac(mac))
+        token_suffix = re.sub(r'[^a-z0-9]+', '_', serial.lower()).strip('_') or 'camera'
         onvif_port = 80 if preserve_port_80 else first_onvif_port + index - 1
 
         path_name = "".join(
@@ -187,6 +189,12 @@ def migrate(source_config, *, parent_interface, onvif_username, onvif_password,
             "rtspPort": 8554,
             "onvifPort": onvif_port,
             "pathName": path_name,
+            "mediaTokens": {
+                "mainProfile": f"profile_hq_{token_suffix}",
+                "subProfile": f"profile_lq_{token_suffix}",
+                "mainEncoder": f"video_encoder_hq_{token_suffix}",
+                "subEncoder": f"video_encoder_lq_{token_suffix}",
+            },
             "username": source["username"],
             "password": source["password"],
             "autoStart": True,
@@ -198,8 +206,8 @@ def migrate(source_config, *, parent_interface, onvif_username, onvif_password,
             "subFramerate": sub["framerate"],
             "mainEncoding": main["encoding"],
             "subEncoding": sub["encoding"],
-            "onvifUsername": onvif_username,
-            "onvifPassword": onvif_password,
+            "onvifUsername": onvif_username if onvif_username is not None else source["username"],
+            "onvifPassword": onvif_password if onvif_password is not None else source["password"],
             "transcodeSub": False,
             "transcodeMain": False,
             "disableSubstream": False,
@@ -306,8 +314,8 @@ def migrate(source_config, *, parent_interface, onvif_username, onvif_password,
         "next_onvif_port": first_onvif_port + len(cameras),
         "settings": {
             "serverIp": "localhost",
-            "globalUsername": onvif_username,
-            "globalPassword": onvif_password,
+            "globalUsername": onvif_username if onvif_username is not None else "admin",
+            "globalPassword": onvif_password if onvif_password is not None else "admin",
             "rtspAuthEnabled": False,
             "rtspPort": 8554,
             "webPort": 5552,
@@ -344,8 +352,8 @@ def main(argv=None):
         default="ens19",
         help="Parent interface used for virtual camera NICs",
     )
-    parser.add_argument("--onvif-username", default="admin")
-    parser.add_argument("--onvif-password", default="admin")
+    parser.add_argument("--onvif-username", help="Override all cameras; otherwise preserve each recorder username")
+    parser.add_argument("--onvif-password", help="Override all cameras; otherwise preserve each recorder password")
     parser.add_argument("--first-onvif-port", type=int, default=8001)
     parser.add_argument(
         "--preserve-port-80",

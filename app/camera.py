@@ -8,6 +8,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from werkzeug.serving import make_server, ThreadedWSGIServer
 from .config import (
@@ -22,11 +23,12 @@ from .device_identity import (
     normalize_identity,
     normalize_mac,
     normalize_uuid,
+    virtual_nic_name,
 )
 from .linux_network import LinuxNetworkManager
 from .utils import get_local_ip
 from .ai_device import get_shared_model as get_shared_ai_model, AI_INFERENCE_LOCK as _AI_INFERENCE_LOCK
-from .analytics_events import AnalyticsStateAggregator, to_onvif_event, topic_to_type
+from .analytics_events import AnalyticsStateAggregator, TYPE_TO_TOPIC, to_onvif_event, topic_to_type
 
 
 class ThreadPoolWSGIServer(ThreadedWSGIServer):
@@ -172,6 +174,14 @@ class VirtualONVIFCamera:
         self.rtsp_port = config.get('rtspPort', MEDIAMTX_PORT)
         self.onvif_port = config.get('onvifPort', 8000 + self.id)
         self.path_name = config.get('pathName', f'camera{self.id}')
+        self.media_tokens = dict(config.get('mediaTokens') or {})
+        allowed_tokens = {'mainProfile', 'subProfile', 'mainEncoder', 'subEncoder'}
+        if any(key not in allowed_tokens or not isinstance(value, str)
+               or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,200}', value) for key, value in self.media_tokens.items()):
+            raise ValueError('Invalid persistent Media token configuration')
+        for main, sub in (('mainProfile', 'subProfile'), ('mainEncoder', 'subEncoder')):
+            if main in self.media_tokens and self.media_tokens.get(main) == self.media_tokens.get(sub):
+                raise ValueError('Main and sub Media tokens must differ')
         self.username = config.get('username', 'admin')
         self.password = config.get('password', '')
         self.auto_start = config.get('autoStart', False)
@@ -392,16 +402,19 @@ class VirtualONVIFCamera:
                 # Setup Virtual NIC if requested (Linux only)
                 if self.use_virtual_nic and self.network_mgr:
                     # VNIC name must be <= 15 chars on Linux.
-                    # Use UUID (stripped of hyphens) to ensure uniqueness regardless of camera name.
-                    vnic_name = f"vnic_{self.uuid.replace('-', '')[:10]}"
-                    if self.network_mgr.create_macvlan(self.parent_interface, vnic_name, self.nic_mac):
-                        self.assigned_ip = self.network_mgr.setup_ip(
-                            vnic_name,
-                            self.ip_mode,
-                            self.static_ip,
-                            self.netmask,
-                            self.gateway
-                        )
+                    # Hash the full UUID, including legacy MAC-derived suffixes.
+                    vnic_name = virtual_nic_name(self.uuid)
+                    if not self.network_mgr.create_macvlan(self.parent_interface, vnic_name, self.nic_mac):
+                        raise RuntimeError(f"Cannot create virtual NIC for {self.name}")
+                    self.assigned_ip = self.network_mgr.setup_ip(
+                        vnic_name,
+                        self.ip_mode,
+                        self.static_ip,
+                        self.netmask,
+                        self.gateway
+                    )
+                    if not self.assigned_ip:
+                        raise RuntimeError(f"Cannot assign virtual NIC IP for {self.name}")
                     # Give the system and router a moment to stabilize
                     time.sleep(0.5)
                     if self.assigned_ip:
@@ -534,7 +547,7 @@ class VirtualONVIFCamera:
             # Cleanup Virtual NIC only after listeners/threads are gone.
             if self.use_virtual_nic and self.network_mgr:
                 self._stop_keepalive()
-                vnic_name = f"vnic_{self.uuid.replace('-', '')[:10]}"
+                vnic_name = virtual_nic_name(self.uuid)
                 self.network_mgr.remove_interface(vnic_name)
                 self.assigned_ip = None
         
@@ -650,6 +663,7 @@ class VirtualONVIFCamera:
             'rtspPort': self.rtsp_port,
             'onvifPort': self.onvif_port,
             'pathName': self.path_name,
+            'mediaTokens': dict(self.media_tokens),
             'username': self.username,
             'password': self.password,
             'autoStart': self.auto_start,
@@ -742,6 +756,7 @@ class VirtualONVIFCamera:
             'rtspPort': self.rtsp_port,
             'onvifPort': self.onvif_port,
             'pathName': self.path_name,
+            'mediaTokens': dict(self.media_tokens),
             'username': self.username,
             'password': self.password,
             'autoStart': self.auto_start,
@@ -1663,12 +1678,7 @@ class VirtualONVIFCamera:
         # 2. If smart topics are enabled, update individual smart events
         if getattr(self, 'send_smart_onvif_topics', True):
             # Define standard smart mappings
-            mappings = {
-                'person': ('UserAlarm/IVA/HumanShapeDetect', 'State'),
-                'vehicle': ('VehicleAlarm/IVB/VehicleDetect', 'State'),
-                'animal': ('UserAlarm/IVA/AnimalDetect', 'State'),
-                'package': ('UserAlarm/IVA/PackageDetect', 'State')
-            }
+            mappings = {key: TYPE_TO_TOPIC[key] for key in ('person', 'vehicle', 'animal', 'package')}
             
             # Check what's active in the current call
             current_smart_tags = set()

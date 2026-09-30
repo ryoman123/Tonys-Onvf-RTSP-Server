@@ -36,18 +36,28 @@ This file is the live handoff/checkpoint for the Tony-based unified runtime.
 - #2 — `fix: make ONVIF media profiles schema-strict`
 - #3 — `fix: make ONVIF device capability advertising truthful`
 
+## Deployment candidate additions
+
+- Persistent Protect-facing identity and UI/API plumbing.
+- Frigate MQTT and Lorex/Dahua recorder event producers.
+- Multi-producer state aggregation.
+- Per-stream H.264/H.265 Media metadata.
+- Runtime readiness and identity acceptance endpoints.
+- Offline bridge migration preserving recorder credentials and profile/encoder tokens.
+- Full-UUID NIC naming for MAC-derived legacy UUIDs; failed NIC setup fails closed.
+- Protect-listener-compatible person/vehicle/animal/package topic mappings.
+- Sequential source/output video preflight, transactional cutover and automatic rollback.
+- Immutable production image workflow, container startup smoke check and field runbook.
+
+See [FIELD_DEPLOYMENT.md](FIELD_DEPLOYMENT.md) for VM104 prepare/deploy/rollback.
+
 ## Next
 
-1. Stable configurable Protect-facing identity fields with persistence and UI/API plumbing.
-2. Strict remaining Media configuration operations and nested ONVIF fault subcodes.
-3. WS-Discovery scopes/identity consistency audit.
-4. Frigate MQTT producer feeding the unified event engine.
-5. Lorex/Dahua native recorder event producer.
-6. Multi-producer state aggregation so one event source cannot clear another source's active state.
-7. Runtime readiness/status endpoints suitable for automated acceptance.
-8. Port the 29-camera identity manifest, acceptance/soak gate and transactional rollback tooling.
-9. Immutable image build/publish workflow.
-10. Live Protect field validation before any VM104 cutover.
+1. Complete candidate CI, image build and startup smoke gate, then integrate PR #6.
+2. Prepare the actual 29-camera configuration on VM104 and verify both streams per camera.
+3. Verify Protect-side listener availability for smart detections; it is a third-party dependency.
+4. Run temporary field cutover with automatic rollback, real Protect event checks and restart recovery.
+5. Extend the live soak before promoting the unified runtime as the primary deployment.
 
 ## Production gate
 

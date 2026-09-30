@@ -25,8 +25,8 @@ TOPICS = {
     "motion": "RuleEngine/CellMotionDetector/Motion",
     "person": "UserAlarm/IVA/HumanShapeDetect",
     "vehicle": "VehicleAlarm/IVB/VehicleDetect",
-    "animal": "UserAlarm/IVA/AnimalDetect",
-    "package": "UserAlarm/IVA/PackageDetect",
+    "animal": "RuleEngine/MyRuleDetector/DogCatDetect",
+    "package": "RuleEngine/MyRuleDetector/Package",
 }
 
 DEFAULT_TOPICS = tuple(TOPICS.values())

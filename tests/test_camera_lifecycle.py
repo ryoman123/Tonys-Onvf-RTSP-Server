@@ -1,5 +1,6 @@
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
 from app.camera import VirtualONVIFCamera
 
@@ -34,6 +35,37 @@ class _FakeThread:
 
 
 class CameraLifecycleTests(unittest.TestCase):
+    def test_failed_virtual_nic_never_starts_http_on_host(self):
+        camera = VirtualONVIFCamera({
+            'id': 1, 'name': 'Migrated', 'uuid': '0242ac11-0001-0000-0000-000000000000',
+            'useVirtualNic': True, 'nicMac': '02:42:ac:11:00:01',
+            'parentInterface': 'ens19', 'ipMode': 'static', 'staticIp': '192.0.2.11',
+            'mainStreamUrl': 'rtsp://192.0.2.20/main', 'subStreamUrl': 'rtsp://192.0.2.20/sub',
+        })
+        camera.network_mgr = Mock()
+        camera.network_mgr.create_macvlan.return_value = False
+        with patch.object(camera, '_start_onvif_service') as start_http:
+            with self.assertRaisesRegex(RuntimeError, 'Cannot create virtual NIC'):
+                camera.start()
+        start_http.assert_not_called()
+        self.assertEqual(camera.status, 'stopped')
+
+    def test_failed_virtual_nic_address_never_starts_http_on_host(self):
+        camera = VirtualONVIFCamera({
+            'id': 1, 'name': 'Migrated', 'uuid': '0242ac11-0001-0000-0000-000000000000',
+            'useVirtualNic': True, 'nicMac': '02:42:ac:11:00:01',
+            'parentInterface': 'ens19', 'ipMode': 'static', 'staticIp': '192.0.2.11',
+            'mainStreamUrl': 'rtsp://192.0.2.20/main', 'subStreamUrl': 'rtsp://192.0.2.20/sub',
+        })
+        camera.network_mgr = Mock()
+        camera.network_mgr.create_macvlan.return_value = True
+        camera.network_mgr.setup_ip.return_value = None
+        with patch.object(camera, '_start_onvif_service') as start_http:
+            with self.assertRaisesRegex(RuntimeError, 'Cannot assign virtual NIC IP'):
+                camera.start()
+        start_http.assert_not_called()
+        self.assertEqual(camera.status, 'stopped')
+
     def make_camera(self):
         order = []
         camera = VirtualONVIFCamera.__new__(VirtualONVIFCamera)

@@ -110,6 +110,18 @@ class FakeManager:
 
 
 class RuntimeHealthTests(unittest.TestCase):
+    def test_empty_inventory_cannot_be_ready(self):
+        manager = FakeManager()
+        manager.cameras = []
+        self.assertFalse(build_readiness(manager)['ready'])
+
+    def test_acceptance_rejects_static_ip_drift(self):
+        status = build_readiness(FakeManager())
+        expected = build_identity_manifest(status)
+        expected['cameras'][0]['effectiveIp'] = '192.0.2.99'
+        result = evaluate_acceptance(status, expected_manifest=expected)
+        self.assertIn('Cam 1: effectiveIp differs from identity manifest', result['failures'])
+
     def test_healthy_inventory_is_ready(self):
         status = build_readiness(FakeManager(), boot_id="boot-1")
         self.assertTrue(status["ready"])
