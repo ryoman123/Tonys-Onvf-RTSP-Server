@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
+from .stream_paths import stream_encoding
 
 
 def _utc_now():
@@ -72,13 +74,13 @@ def camera_readiness(camera):
         "identity": identity,
         "streams": {
             "main": {
-                "encoding": camera.main_encoding if hasattr(camera, 'main_encoding') else None,
+                "encoding": stream_encoding(camera, 'main'),
                 "width": camera.main_width,
                 "height": camera.main_height,
                 "framerate": camera.main_framerate,
             },
             "sub": None if getattr(camera, "disable_substream", False) else {
-                "encoding": camera.sub_encoding if hasattr(camera, 'sub_encoding') else None,
+                "encoding": stream_encoding(camera, 'sub'),
                 "width": camera.sub_width,
                 "height": camera.sub_height,
                 "framerate": camera.sub_framerate,
@@ -94,7 +96,83 @@ def camera_readiness(camera):
         "analytics": getattr(camera, "analytics_state", None).health()
         if getattr(camera, "analytics_state", None)
         else None,
+        "localAI": local_ai_readiness(camera),
     }
+
+
+def local_ai_readiness(camera):
+    required = bool(getattr(camera, 'enable_event_forwarding', False)
+                    and getattr(camera, 'event_source', '') == 'ai')
+    frame_at = getattr(camera, '_ai_last_frame_at', 0.0)
+    age = max(0.0, time.time() - frame_at) if frame_at else None
+    running = bool(getattr(camera, '_ai_running', False)
+                   and _thread_alive(getattr(camera, '_ai_thread', None)))
+    model_loaded = bool(getattr(camera, '_ai_model_loaded', False))
+    error = getattr(camera, '_ai_runtime_error', None)
+    ready = bool(running and model_loaded and age is not None and age <= 5.0 and not error)
+    return {'configured': required, 'ready': ready, 'running': running,
+            'modelLoaded': model_loaded, 'frameAgeSeconds': age,
+            'model': getattr(camera, 'ai_model', None),
+            'targets': list(getattr(camera, 'ai_targets', [])),
+            'smartTopicsEnabled': bool(getattr(camera, 'send_smart_onvif_topics', False)),
+            'error': error}
+
+
+def smart_pipeline_readiness(manager, cameras, *, core_ready, external_ready, external):
+    """Configuration/runtime evidence, never a claim about Protect's timeline."""
+    issues = []
+    cfg = getattr(manager, 'external_analytics_config', {})
+    frigate = cfg.get('frigate', {})
+    frigate_connected = bool(frigate.get('enabled')
+        and (external.get('frigate') or {}).get('state') == 'connected'
+        and (external.get('frigate') or {}).get('available') is not False)
+    recorder_health = {item.get('name'): item.get('state') for item in external.get('recorders', [])}
+    for camera in cameras:
+        refs = {str(camera['id']), camera['name'], camera['pathName']}
+        local = camera['localAI']
+        sources = []
+        if local['configured'] and local['ready'] and local['smartTopicsEnabled']:
+            if set(local['targets']) & {'person', 'vehicle', 'animal', 'package'}:
+                sources.append('local_ai')
+        if frigate_connected and (frigate.get('autoMap') or any(
+                str(value) in refs for value in (frigate.get('cameraMap') or {}).values())):
+            sources.append('frigate')
+        for recorder in cfg.get('recorders', []):
+            if (recorder.get('enabled') and recorder_health.get(recorder.get('name')) == 'connected'
+                    and any(str(value) in refs for value in (recorder.get('channelMap') or {}).values())):
+                sources.append(str(recorder.get('name')))
+        camera['smartSources'] = sources
+        if not sources:
+            issues.append(f"{camera['name']}: no configured, healthy smart-detection producer")
+        if (camera.get('events') or {}).get('subscriptions', 0) < 1:
+            issues.append(f"{camera['name']}: no active PullPoint subscriber")
+
+    listener = getattr(manager, 'protect_listener', None)
+    public = listener.get_public_state() if listener else {}
+    targets = public.get('nvrs') or []
+    if not targets:
+        issues.append('Protect event listener target is not configured')
+    if targets and not public.get('monitorEnabled'):
+        issues.append('Protect event listener monitoring is disabled')
+    nvr_status = []
+    for target in targets:
+        checked_at = target.get('checkedAt', 0)
+        fresh = bool(checked_at and 0 <= time.time() - checked_at <= 360)
+        active = bool(target.get('status') == 'active' and fresh)
+        nvr_status.append({'id': target.get('id'), 'name': target.get('name'),
+                           'status': target.get('status'), 'fresh': fresh, 'active': active})
+        if not active:
+            issues.append(f"{target.get('name', 'Protect recorder')}: listener is inactive or health check is stale")
+    if not core_ready:
+        issues.append('camera/video runtime is not ready')
+    if not external_ready:
+        issues.append('a configured analytics producer is not ready')
+    ready = bool(cameras and not issues)
+    return {'readyForLiveTest': ready, 'timelineVerified': False,
+            'status': 'awaiting-protect-validation' if ready else 'incomplete',
+            'issues': issues, 'protectListeners': nvr_status,
+            'liveValidationRequired': ['real detections on the correct Protect timeline',
+                'detection clearing', 'thumbnails and configured notifications', 'restart recovery']}
 
 
 def build_readiness(manager, *, boot_id=None):
@@ -166,6 +244,10 @@ def build_readiness(manager, *, boot_id=None):
         recorder_health.get(name, {}).get("state") == "connected"
         for name in enabled_recorders
     )
+    local_ai_ready = all(item['localAI']['ready'] for item in cameras if item['localAI']['configured'])
+    analytics_ready = bool(frigate_ready and recorder_ready and local_ai_ready)
+    full_stack = smart_pipeline_readiness(manager, cameras, core_ready=core_ready,
+                                         external_ready=analytics_ready, external=external)
 
     return {
         "status": "healthy" if core_ready else "degraded",
@@ -188,10 +270,12 @@ def build_readiness(manager, *, boot_id=None):
         },
         "analytics": {
             **external,
-            "ready": bool(frigate_ready and recorder_ready),
+            "ready": analytics_ready,
+            "localAIReady": local_ai_ready,
             "frigateRequired": frigate_required,
             "enabledRecorders": sorted(enabled_recorders),
         },
+        "fullStack": full_stack,
     }
 
 
@@ -201,6 +285,7 @@ def evaluate_acceptance(
     expected_cameras=None,
     require_pullpoint_subscribers=False,
     require_analytics=False,
+    require_smart_pipeline=False,
     expected_manifest=None,
 ):
     failures = []
@@ -242,6 +327,11 @@ def evaluate_acceptance(
 
     if require_analytics and not (status.get("analytics") or {}).get("ready"):
         failures.append("required external analytics producer is not ready")
+
+    if require_smart_pipeline:
+        full_stack = status.get('fullStack') or {}
+        if not full_stack.get('readyForLiveTest'):
+            failures.extend(full_stack.get('issues') or ['complete smart-detection pipeline is not ready'])
 
     expected_items = []
     if expected_manifest:

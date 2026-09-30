@@ -53,13 +53,19 @@ RUN pip install --no-cache-dir \
 # Install AI dependencies (ultralytics / YOLO + headless OpenCV)
 RUN pip install --no-cache-dir \
     ultralytics \
-    opencv-python-headless
+    opencv-python-headless \
+    easyocr \
+    huggingface-hub
 
 # Pre-download the default YOLO model so it's available immediately at runtime
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # Copy the rest of the application
 COPY . .
+
+# Bundle the pinned plate detector and English OCR weights, so these inherited
+# Tony features work with internet access disabled on the camera VLAN.
+RUN python -c "from app.ai_device import get_shared_plate_model, get_shared_ocr_reader; from pathlib import Path; import shutil; model = get_shared_plate_model(); Path('models').mkdir(exist_ok=True); shutil.copyfile(model.ckpt_path, 'models/license_plate.pt'); get_shared_ocr_reader()"
 
 # Default Web UI port. Override at build/run time with the WEB_UI_PORT env var.
 # (With network_mode: host this is informational; the app binds this port on the host.)

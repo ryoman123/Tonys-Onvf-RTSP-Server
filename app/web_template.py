@@ -3353,6 +3353,10 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                                     <label class="form-label">Main Stream Path</label>
                                     <input type="text" class="form-input" id="mainPath" placeholder="/stream1" value="/stream1" required>
                                 </div>
+                                <div class="form-group">
+                                    <label class="form-label">Source Video Codec</label>
+                                    <select class="form-input" id="mainEncoding"><option value="H264">H.264</option><option value="H265">H.265 / HEVC</option></select>
+                                </div>
                                 
                                 <label class="form-label">Resolution & FPS</label>
                                 <div class="form-row" style="grid-template-columns: 1fr 1fr 1fr; margin-bottom: 0;">
@@ -3397,6 +3401,10 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                                     <div class="form-group" id="subPathContainer">
                                         <label class="form-label">Sub Stream Path</label>
                                         <input type="text" class="form-input" id="subPath" placeholder="/stream2" value="/stream2">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Source Video Codec</label>
+                                        <select class="form-input" id="subEncoding"><option value="H264">H.264</option><option value="H265">H.265 / HEVC</option></select>
                                     </div>
                                     
                                     <label class="form-label">Resolution & FPS</label>
@@ -4858,7 +4866,7 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
         let cameras = [];
         let matrixActive = false;
         // Inject server-side settings
-        let settings = {json.dumps(current_settings) if current_settings else '{{}}'};
+        let settings = {json.dumps(current_settings or {})};
         
         // Use localStorage to persist the "last known good" IP
         if (settings.serverIp && settings.serverIp !== 'localhost') {{
@@ -6089,6 +6097,15 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
             }}
         }}
 
+        function browserStreamPath(videoId, cameraId, pathName) {{
+            let profile = 'sub';
+            if (videoId.startsWith('matrix-player-')) {{
+                profile = (settings.matrixForceHighStream === true) ? 'main' : (matrixStreamProfiles[cameraId] || 'sub');
+            }}
+            const camera = cameras.find(cam => String(cam.id) === String(cameraId));
+            return camera?.browserPaths?.[profile] || `${{pathName}}_${{profile}}`;
+        }}
+
         async function initWebRTCPlayer(videoId, cameraId, pathName, serverIp, videoElement) {{
             console.log(`Initializing WebRTC for ${{videoId}}`);
             try {{
@@ -6110,12 +6127,7 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
                 
-                let suffix = '_sub';
-                if (videoId.startsWith('matrix-player-')) {{
-                    const profile = (settings.matrixForceHighStream === true) ? 'main' : (matrixStreamProfiles[cameraId] || 'sub');
-                    suffix = profile === 'main' ? '_main' : '_sub';
-                }}
-                const whepUrl = `http://${{serverIp}}:8889/${{pathName}}${{suffix}}/whep`;
+                const whepUrl = `http://${{serverIp}}:8889/${{browserStreamPath(videoId, cameraId, pathName)}}/whep`;
                 
                 let fetchHeaders = {{ 'Content-Type': 'application/sdp' }};
                 const gUserW = settings.globalUsername || 'admin';
@@ -6193,15 +6205,10 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                 credentials = `?user=${{u}}&pass=${{p}}`;
             }}
             
-            let suffix = '_sub';
-            if (videoId.startsWith('matrix-player-')) {{
-                const profile = (settings.matrixForceHighStream === true) ? 'main' : (matrixStreamProfiles[cameraId] || 'sub');
-                suffix = profile === 'main' ? '_main' : '_sub';
-            }}
             
             // Construct stream URL - Use current protocol if possible to support reverse proxies
             const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
-            const streamUrl = `http://${{serverIp}}:8888/${{pathName}}${{suffix}}/index.m3u8${{credentials}}`;
+            const streamUrl = `http://${{serverIp}}:8888/${{browserStreamPath(videoId, cameraId, pathName)}}/index.m3u8${{credentials}}`;
             
             if (typeof Hls !== 'undefined' && Hls.isSupported()) {{
                 // Prefer HLS.js if available and supported (Chrome, Firefox, Edge, Android, etc.)
@@ -6549,6 +6556,8 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
             
             document.getElementById('transcodeSub').checked = false;
             document.getElementById('transcodeMain').checked = false;
+            document.getElementById('mainEncoding').value = 'H264';
+            document.getElementById('subEncoding').value = 'H264';
             document.getElementById('enableAudio').checked = false;
             document.getElementById('transcodeMainAudio').checked = false;
             document.getElementById('transcodeSubAudio').checked = false;
@@ -6690,6 +6699,8 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
             document.getElementById('subHeight').value = camera.subHeight || 480;
             document.getElementById('mainFramerate').value = camera.mainFramerate || 30;
             document.getElementById('subFramerate').value = camera.subFramerate || 15;
+            document.getElementById('mainEncoding').value = camera.mainEncoding || 'H264';
+            document.getElementById('subEncoding').value = camera.subEncoding || 'H264';
             document.getElementById('transcodeSub').checked = camera.transcodeSub || false;
             document.getElementById('transcodeMain').checked = camera.transcodeMain || false;
             document.getElementById('disableSubstream').checked = camera.disableSubstream || false;
@@ -8464,6 +8475,8 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                 subHeight: parseInt(document.getElementById('subHeight').value),
                 mainFramerate: parseInt(document.getElementById('mainFramerate').value),
                 subFramerate: parseInt(document.getElementById('subFramerate').value),
+                mainEncoding: document.getElementById('mainEncoding').value,
+                subEncoding: document.getElementById('subEncoding').value,
                 transcodeSub: document.getElementById('transcodeSub').checked,
                 transcodeMain: document.getElementById('transcodeMain').checked,
                 disableSubstream: document.getElementById('disableSubstream').checked,
@@ -8894,6 +8907,9 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                     const data = await response.json();
                     
                     // Populate the appropriate fields
+                    if (data.codec) {{
+                        document.getElementById(streamType + 'Encoding').value = ['hevc', 'h265'].includes(data.codec.toLowerCase()) ? 'H265' : 'H264';
+                    }}
                     if (streamType === 'main') {{
                         document.getElementById('mainWidth').value = data.width;
                         document.getElementById('mainHeight').value = data.height;

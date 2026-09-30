@@ -958,15 +958,11 @@ class CameraManager:
             main_url = f"rtsp://{host}:{rtsp_port}{main_path}"
             sub_url = f"rtsp://{host}:{rtsp_port}{sub_path}"
         
-        # Create safe path name
-        path_name = name.lower().replace(' ', '_').replace('-', '_')
-        path_name = ''.join(c for c in path_name if c.isalnum() or c == '_')
-        
         # Update camera properties
         camera.name = name
         camera.main_stream_url = main_url
         camera.sub_stream_url = sub_url
-        camera.path_name = path_name
+        # Preserve cached recorder URIs when a display name or AI setting changes.
         camera.username = username
         camera.password = password
         camera.auto_start = auto_start
@@ -981,8 +977,6 @@ class CameraManager:
             camera.main_encoding = camera._normalize_video_encoding(main_encoding)
         if sub_encoding is not None:
             camera.sub_encoding = sub_encoding
-        camera.onvif_username = self.global_username
-        camera.onvif_password = self.global_password
         camera.transcode_sub = transcode_sub
         camera.transcode_main = transcode_main
         camera.disable_substream = disable_substream

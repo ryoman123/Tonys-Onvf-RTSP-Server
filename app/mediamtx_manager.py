@@ -12,6 +12,7 @@ import secrets
 import threading
 from pathlib import Path
 from .config import MEDIAMTX_PORT, MEDIAMTX_API_PORT, WEB_UI_PORT, DATA_DIR
+from .stream_paths import internal_rtsp_url, stream_encoding, stream_path
 
 class MediaMTXManager:
     """Manages MediaMTX RTSP server"""
@@ -231,6 +232,35 @@ class MediaMTXManager:
             self._codec_cache[stream_url] = (codec, now + ttl)
         return codec
 
+    def _add_browser_preview(self, paths, camera, kind, rtsp_port, username, password,
+                             ffmpeg_exe, ff_global, ff_input):
+        if stream_encoding(camera, kind) != 'H265':
+            return
+        # Read our own relay so opening the dashboard does not open another
+        # physical-recorder session. No encoder runs until a browser connects.
+        source = internal_rtsp_url(camera, kind, port=rtsp_port,
+                                   username=username or '', password=password)
+        destination = source.rsplit('/', 1)[0] + '/' + stream_path(camera, kind, browser=True)
+        width = getattr(camera, kind + '_width')
+        height = getattr(camera, kind + '_height')
+        fps = getattr(camera, kind + '_framerate')
+        audio = '-map 0:a? -c:a aac -ar 48000 -ac 1 -b:a 64k' if camera.enable_audio else '-an'
+        args = [str(ffmpeg_exe)]
+        args += shlex.split(ff_global) + ['-nostdin'] + shlex.split(ff_input)
+        args += ['-i', source, '-map', '0:v:0', '-vf',
+                 f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p',
+                 '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+                 '-profile:v', 'high', '-threads', '2', '-r', str(fps),
+                 '-g', str(fps), '-sc_threshold', '0']
+        args += shlex.split(audio) + ['-f', 'rtsp', '-rtsp_transport', 'tcp', destination]
+        cmd = subprocess.list2cmdline(args) if platform.system().lower() == 'windows' else shlex.join(args)
+        paths[stream_path(camera, kind, browser=True)] = {
+            'source': 'publisher', 'overridePublisher': True,
+            'runOnDemand': cmd, 'runOnDemandRestart': True,
+            'runOnDemandStartTimeout': '30s', 'runOnDemandCloseAfter': '10s',
+            'record': False,
+        }
+
     def create_config(self, cameras, rtsp_port=None, rtsp_username=None, rtsp_password=None, grid_fusion=None, debug_mode=False, advanced_settings=None, web_port=None):
         """Create MediaMTX configuration optimized for multiple cameras and viewers"""
         if rtsp_port is None:
@@ -445,6 +475,8 @@ class MediaMTXManager:
 
                 
                 config['paths'][f'{camera.path_name}_main'] = main_path_cfg
+                self._add_browser_preview(config['paths'], camera, 'main', rtsp_port,
+                    rtsp_username, rtsp_password, ffmpeg_exe, ff_global, ff_input)
                 
                 # ===== SUB STREAM - Lower Quality, Optimized for Viewing =====
                 
@@ -464,16 +496,9 @@ class MediaMTXManager:
                 else:
                     sub_source = camera.sub_stream_url
 
-                # Auto-transcode H.265/HEVC substreams to H.264 so the web dashboard
-                # (WebRTC and HLS) can play them — browsers can't decode HEVC. The main
-                # stream is left untouched so the NVR keeps the original H.265 feed.
-                auto_h264_sub = False
-                if not transcode_sub:
-                    src_codec = self._get_source_codec(sub_source)
-                    if src_codec in ('hevc', 'h265'):
-                        auto_h264_sub = True
-                        print(f"    Auto-transcoding {camera.name} sub-stream H.265 -> H.264 for browser playback")
-                transcode_sub_video = transcode_sub or auto_h264_sub
+                # The recorder's path always follows the explicit codec choice.
+                # H.265 browser compatibility lives on a separate on-demand path.
+                transcode_sub_video = transcode_sub
 
                 if transcode_sub_video or (enable_audio and transcode_sub_audio):
                     print(f"    Transcoding enabled for {camera.name} sub-stream")
@@ -563,6 +588,8 @@ class MediaMTXManager:
                     }
                 
                 config['paths'][f'{camera.path_name}_sub'] = sub_path_cfg
+                self._add_browser_preview(config['paths'], camera, 'sub', rtsp_port,
+                    rtsp_username, rtsp_password, ffmpeg_exe, ff_global, ff_input)
                 
                 print(f"  Added {camera.name}: {camera.path_name}_main and {camera.path_name}_sub")
         

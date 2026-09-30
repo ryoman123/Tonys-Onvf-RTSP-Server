@@ -116,6 +116,8 @@ def main(argv=None):
         default=0,
         help="Continue checking readiness/continuity for this many seconds",
     )
+    parser.add_argument('--require-smart-pipeline', action='store_true',
+                        help='Require healthy per-camera detection, PullPoints and a recently checked Protect listener')
     parser.add_argument(
         "--interval-seconds",
         type=int,
@@ -131,6 +133,7 @@ def main(argv=None):
         expected_cameras=args.expected_cameras,
         require_pullpoint_subscribers=args.require_pullpoint_subscribers,
         require_analytics=args.require_analytics,
+        require_smart_pipeline=args.require_smart_pipeline,
         expected_manifest=manifest,
     )
 
@@ -147,6 +150,7 @@ def main(argv=None):
             expected_cameras=args.expected_cameras,
             require_pullpoint_subscribers=args.require_pullpoint_subscribers,
             require_analytics=args.require_analytics,
+            require_smart_pipeline=args.require_smart_pipeline,
             expected_manifest=manifest,
         )
         failures.extend(sample["failures"])
@@ -161,6 +165,7 @@ def main(argv=None):
         "bootId": baseline.get("bootId"),
         "timestamp": baseline.get("timestamp"),
         "soakSeconds": max(0, args.soak_seconds),
+        "smartPipeline": baseline.get('fullStack'),
     }
     print(json.dumps(output, indent=2))
 
