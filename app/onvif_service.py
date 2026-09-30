@@ -1344,7 +1344,11 @@ class ONVIFService:
 
         soap_response = """<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+                   xmlns:wsa="http://www.w3.org/2005/08/addressing"
                    xmlns:tet="http://www.onvif.org/ver10/events/wsdl">
+    <SOAP-ENV:Header>
+        <wsa:Action>http://www.onvif.org/ver10/events/wsdl/PullPointSubscription/SetSynchronizationPointResponse</wsa:Action>
+    </SOAP-ENV:Header>
     <SOAP-ENV:Body>
         <tet:SetSynchronizationPointResponse/>
     </SOAP-ENV:Body>
@@ -1405,9 +1409,13 @@ class ONVIFService:
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
                    xmlns:tet="http://www.onvif.org/ver10/events/wsdl"
                    xmlns:wstop="http://docs.oasis-open.org/wsn/t-1"
+                   xmlns:wsa="http://www.w3.org/2005/08/addressing"
                    xmlns:tns1="http://www.onvif.org/ver10/topics"
                    xmlns:tt="http://www.onvif.org/ver10/schema"
                    xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <SOAP-ENV:Header>
+        <wsa:Action>http://www.onvif.org/ver10/events/wsdl/EventPortType/GetEventPropertiesResponse</wsa:Action>
+    </SOAP-ENV:Header>
     <SOAP-ENV:Body>
         <tet:GetEventPropertiesResponse>
             <tet:TopicNamespaceLocation>http://www.onvif.org/onvif/ver10/topics/topicns.xml</tet:TopicNamespaceLocation>
@@ -1415,7 +1423,6 @@ class ONVIFService:
             {topic_set}
             <tet:TopicExpressionDialect>{CONCRETE_TOPIC_DIALECT}</tet:TopicExpressionDialect>
             <tet:TopicExpressionDialect>{CONCRETE_SET_DIALECT}</tet:TopicExpressionDialect>
-            <tet:MessageContentFilterDialect>http://www.onvif.org/ver10/tev/messageContentFilter/ItemFilter</tet:MessageContentFilterDialect>
             <tet:MessageContentSchemaLocation>http://www.onvif.org/ver10/schema/onvif.xsd</tet:MessageContentSchemaLocation>
         </tet:GetEventPropertiesResponse>
     </SOAP-ENV:Body>
@@ -1426,7 +1433,11 @@ class ONVIFService:
         max_pullpoints = self.event_engine.max_pullpoints
         soap_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
-                   xmlns:tet="http://www.onvif.org/ver10/events/wsdl">
+                   xmlns:tet="http://www.onvif.org/ver10/events/wsdl"
+                   xmlns:wsa="http://www.w3.org/2005/08/addressing">
+    <SOAP-ENV:Header>
+        <wsa:Action>http://www.onvif.org/ver10/events/wsdl/EventPortType/GetServiceCapabilitiesResponse</wsa:Action>
+    </SOAP-ENV:Header>
     <SOAP-ENV:Body>
         <tet:GetServiceCapabilitiesResponse>
             <tet:Capabilities WSSubscriptionPolicySupport="false"

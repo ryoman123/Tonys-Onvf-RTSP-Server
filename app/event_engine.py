@@ -211,6 +211,8 @@ def parse_topic_filter(body: str, known_topics=DEFAULT_TOPICS):
 
     expressions: list[str] = []
     for node in root.iter():
+        if _local_name(node.tag) == "MessageContent":
+            raise EventSubscriptionError("unsupported-filter", "Message content filters are not supported")
         if _local_name(node.tag) != "TopicExpression":
             continue
 
