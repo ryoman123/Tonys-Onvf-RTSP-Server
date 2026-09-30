@@ -15,6 +15,7 @@ import threading
 import time
 from types import SimpleNamespace
 from urllib.parse import urlparse
+from urllib.request import urlopen
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -118,6 +119,8 @@ def exercise():
             relay.create_config([camera, dual], rtsp_port=18554, rtsp_username=auth_user, rtsp_password=auth_password)
             config = yaml.safe_load(Path(relay.config_file).read_text())
             config['paths']['input'] = {'source': 'publisher'}
+            config['apiAddress'] = '127.0.0.1:19997'
+            config['hlsAddress'] = '127.0.0.1:18888'
             config['logLevel'] = 'error'
             Path(relay.config_file).write_text(yaml.safe_dump(config))
             logs = open(Path(directory) / 'media.log', 'w+')
@@ -165,10 +168,30 @@ def exercise():
                     capture_output=True, text=True, timeout=40)
                 require(result.returncode == 0, 'recorder/browser RTSP probe failed')
                 require(json.loads(result.stdout)['streams'][0]['codec_name'] == codec, 'recorder/browser codec drift')
+            # Exercise the browser's actual HLS endpoint, including its HTTP
+            # authentication, rather than only probing the preview over RTSP.
+            hls_url = f'http://{auth_user}:{auth_password}@127.0.0.1:18888/{stream_path(dual, "sub", browser=True)}/index.m3u8'
+            result = subprocess.run(['ffprobe', '-v', 'error', '-rw_timeout', '15000000',
+                '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'json', hls_url],
+                capture_output=True, text=True, timeout=40)
+            require(result.returncode == 0, 'authenticated browser HLS probe failed')
+            require(json.loads(result.stdout)['streams'][0]['codec_name'] == 'h264', 'browser HLS codec drift')
             camera.stop_ai_detection()
             seen.update(collect())
             for topic in ('UserAlarm/IVA/HumanShapeDetect', 'VehicleAlarm/IVB/VehicleDetect'):
                 require(('tns1:' + topic, 'false') in seen, 'local detector stop did not clear ONVIF state')
+            deadline = time.monotonic() + 35
+            idle = False
+            while time.monotonic() < deadline:
+                with urlopen('http://127.0.0.1:19997/v3/paths/list', timeout=5) as response:
+                    paths = json.load(response)['items']
+                previews = [item for item in paths if item['name'].endswith('_browser')]
+                if previews and all(not item['ready'] for item in previews):
+                    idle = True
+                    break
+                time.sleep(.5)
+            require(idle, 'preview encoders kept running after RTSP/HLS viewers disconnected')
+            print('PASS: authenticated browser HLS and idle preview encoder shutdown', flush=True)
             print('PASS: authenticated HEVC -> local YOLO -> authenticated ONVIF start/clear, alert snapshots and browser H.264 preview', flush=True)
     except Exception:
         if 'logs' in locals():
