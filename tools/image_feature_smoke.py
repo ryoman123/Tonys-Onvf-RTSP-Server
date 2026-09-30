@@ -57,11 +57,19 @@ def exercise():
     require('ABC123' in text, 'bundled OCR failed the English plate-text sample')
     print('PASS: real YOLO detection, pinned plate-model inference and offline OCR', flush=True)
 
-    auth_user, auth_password = 'smoke@', 'p:/?#'
+    auth_user, auth_password = 'smoke-relay', 'relay-test-password'
+    source_user, source_password = 'source@', 'p:/?#'
+    source_reads = []
     class AuthHandler(BaseHTTPRequestHandler):
         def do_POST(self):
             data = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
-            self.send_response(200 if data.get('user') == auth_user and data.get('password') == auth_password else 401)
+            expected_user, expected_password = auth_user, auth_password
+            if data.get('action') == 'read' and data.get('path') == 'input':
+                expected_user, expected_password = source_user, source_password
+            valid = data.get('user') == expected_user and data.get('password') == expected_password
+            if valid and data.get('path') == 'input' and data.get('action') == 'read':
+                source_reads.append(True)
+            self.send_response(200 if valid else 401)
             self.end_headers()
         def log_message(self, *args):
             pass
@@ -75,7 +83,7 @@ def exercise():
         notifier=SimpleNamespace(send_ai_detection=lambda **data: notifications.append(data)),
         onvif_events=[], is_ip_whitelisted=lambda ip: False)
     camera = VirtualONVIFCamera({'id': 1, 'name': 'Offline image smoke', 'pathName': 'smoke',
-        'mainStreamUrl': 'rtsp://smoke%40:p%3A%2F%3F%23@127.0.0.1:18554/input', 'subStreamUrl': '',
+        'mainStreamUrl': 'rtsp://source%40:p%3A%2F%3F%23@127.0.0.1:18554/input', 'subStreamUrl': '',
         'rtspPort': 18554, 'mainEncoding': 'H265', 'mainWidth': 640, 'mainHeight': 480,
         'mainFramerate': 4, 'disableSubstream': True, 'enableEventForwarding': True,
         'eventSource': 'ai', 'aiTargets': ['person', 'vehicle'], 'aiMotionDetectionEnabled': False,
@@ -119,7 +127,8 @@ def exercise():
                 'scale=640:480:force_original_aspect_ratio=decrease,pad=640:480:(ow-iw)/2:(oh-ih)/2',
                 '-c:v', 'libx265', '-preset', 'ultrafast', '-tune', 'zerolatency',
                 '-x265-params', 'pools=1:frame-threads=1:log-level=error', '-pix_fmt', 'yuv420p',
-                '-r', '4', '-g', '4', '-an', '-f', 'rtsp', '-rtsp_transport', 'tcp', camera.main_stream_url],
+                '-r', '4', '-g', '4', '-an', '-f', 'rtsp', '-rtsp_transport', 'tcp',
+                f'rtsp://{auth_user}:{auth_password}@127.0.0.1:18554/input'],
                 stdout=logs, stderr=logs)
             processes.append(publisher)
             camera.start_ai_detection()
@@ -138,6 +147,7 @@ def exercise():
                 require(server.poll() is None and publisher.poll() is None, 'loopback HEVC source stopped')
                 time.sleep(.5)
             require(local_ai_readiness(camera)['ready'], 'detector did not decode fresh authenticated HEVC frames')
+            require(source_reads, 'URL-encoded recorder credentials were not authenticated')
             for topic in ('UserAlarm/IVA/HumanShapeDetect', 'VehicleAlarm/IVB/VehicleDetect'):
                 require(('tns1:' + topic, 'true') in seen, 'real RTSP inference did not reach authenticated PullMessages')
             require(notifications and notifications[0].get('image_bytes'), 'annotated notification snapshot was not produced')
