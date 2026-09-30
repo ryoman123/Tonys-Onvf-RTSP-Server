@@ -282,7 +282,10 @@ class MediaMTXManager:
             'hlsAddress': ':8888',
             
             # ===== HLS SETTINGS - Optimized for multiple viewers =====
-            'hlsAlwaysRemux': True,
+            # An always-on HLS muxer holds an on-demand preview reader open,
+            # preventing its FFmpeg encoder from stopping when viewers leave.
+            'hlsAlwaysRemux': False,
+            'hlsMuxerCloseAfter': '10s',
             'hlsVariant': 'fmp4',  # LL-HLS (fMP4) handles multi-track/Opus better than mpegts
             'hlsSegmentCount': advanced_settings.get('mediamtx', {}).get('hlsSegmentCount', 10) if advanced_settings else 10,
             'hlsSegmentDuration': advanced_settings.get('mediamtx', {}).get('hlsSegmentDuration', '1s') if advanced_settings else '1s',
