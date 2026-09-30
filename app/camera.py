@@ -29,6 +29,7 @@ from .linux_network import LinuxNetworkManager
 from .utils import get_local_ip
 from .ai_device import get_shared_model as get_shared_ai_model, AI_INFERENCE_LOCK as _AI_INFERENCE_LOCK
 from .analytics_events import AnalyticsStateAggregator, TYPE_TO_TOPIC, to_onvif_event, topic_to_type
+from .stream_paths import internal_rtsp_url, redact_rtsp_url, stream_path
 
 
 class ThreadPoolWSGIServer(ThreadedWSGIServer):
@@ -89,6 +90,7 @@ class RTSPFrameGrabber:
         self.rtsp_url = rtsp_url
         self.cap = None
         self.latest_frame = None
+        self.last_frame_at = 0.0
         self.running = False
         self.thread = None
         self.cv2 = None
@@ -110,12 +112,14 @@ class RTSPFrameGrabber:
                     ret, frame = self.cap.read()
                     if ret:
                         self.latest_frame = frame
+                        self.last_frame_at = time.time()
                         last_frame_time = time.time()
                         reconnect_delay = GRABBER_RECONNECT_BASE
                     else:
                         time.sleep(0.01)
                         if time.time() - last_frame_time > 5.0:
-                            print(f"  [AI Camera Grabber] Stream read timeout. Reconnecting to {self.rtsp_url}...")
+                            self.latest_frame = None
+                            print(f"  [AI Camera Grabber] Stream read timeout. Reconnecting to {redact_rtsp_url(self.rtsp_url)}...")
                             try:
                                 self.cap.release()
                             except Exception:
@@ -128,6 +132,7 @@ class RTSPFrameGrabber:
                 except Exception:
                     time.sleep(0.05)
             else:
+                self.latest_frame = None
                 try:
                     if self.cap:
                         self.cap.release()
@@ -137,7 +142,7 @@ class RTSPFrameGrabber:
                     self.cap = self.cv2.VideoCapture(self.rtsp_url)
                     self.cap.set(self.cv2.CAP_PROP_BUFFERSIZE, 1)
                 except Exception as e:
-                    print(f"  [AI Camera Grabber] Error connecting to {self.rtsp_url}: {e}")
+                    print(f"  [AI Camera Grabber] Error connecting to {redact_rtsp_url(self.rtsp_url)}")
                 if self.cap and self.cap.isOpened():
                     reconnect_delay = GRABBER_RECONNECT_BASE
                 else:
@@ -271,6 +276,10 @@ class VirtualONVIFCamera:
         self._motion_state = False
         self._ai_thread = None
         self._ai_running = False
+        self._ai_grabber = None
+        self._ai_model_loaded = False
+        self._ai_last_frame_at = 0.0
+        self._ai_runtime_error = None
         
         # Per-camera AI notification settings
         self.notify_ai_enabled = config.get('notifyAiEnabled', False)
@@ -509,9 +518,10 @@ class VirtualONVIFCamera:
         with self._lifecycle_lock:
             self.status = "stopped"
 
-            if self.enable_event_forwarding:
-                self.stop_event_forwarding()
-                self.stop_ai_detection()
+            # An edit may already have disabled forwarding. Always quiesce any
+            # previously started producer before dropping its ONVIF runtime.
+            self.stop_event_forwarding()
+            self.stop_ai_detection()
 
             if self.onvif_service:
                 try:
@@ -663,6 +673,7 @@ class VirtualONVIFCamera:
             'rtspPort': self.rtsp_port,
             'onvifPort': self.onvif_port,
             'pathName': self.path_name,
+            'browserPaths': {kind: stream_path(self, kind, browser=True) for kind in ('main', 'sub')},
             'mediaTokens': dict(self.media_tokens),
             'username': self.username,
             'password': self.password,
@@ -929,7 +940,7 @@ class VirtualONVIFCamera:
         self.onvif_subscription_active = False
         self.onvif_subscription_error = "Event forwarding stopped"
 
-        thread = self._event_forwarding_thread
+        thread = getattr(self, '_event_forwarding_thread', None)
         if thread and thread is not threading.current_thread():
             thread.join(timeout=8.0)
             if thread.is_alive():
@@ -1186,6 +1197,13 @@ class VirtualONVIFCamera:
 
     def start_ai_detection(self):
         """Start local AI event detection background thread"""
+        if self._ai_thread and self._ai_thread.is_alive():
+            if self._ai_running:
+                return
+            raise RuntimeError(f'Previous AI worker for {self.name} is still stopping')
+        self._ai_model_loaded = False
+        self._ai_last_frame_at = 0.0
+        self._ai_runtime_error = None
         self._ai_running = True
         self._ai_thread = threading.Thread(target=self._ai_detection_loop, daemon=True)
         self._ai_thread.start()
@@ -1195,19 +1213,38 @@ class VirtualONVIFCamera:
         """Stop local AI event detection background thread"""
         self._ai_running = False
         if hasattr(self, '_ai_thread') and self._ai_thread and self._ai_thread.is_alive():
-            try:
-                self._ai_thread.join(timeout=2.0)
-            except Exception:
-                pass
+            if self._ai_thread is not threading.current_thread():
+                self._ai_thread.join(timeout=8.0)
+                if self._ai_thread.is_alive():
+                    raise RuntimeError(f'AI worker for {self.name} did not stop within 8 seconds')
         self.clear_analytics_source('local_ai')
+        self._motion_state = False
+        getattr(self, '_active_smart_tags', set()).clear()
         print(f"  [Camera ({self.name})] Local AI detection thread stopped.")
 
     def _ai_detection_loop(self):
+        try:
+            self._run_ai_detection_loop()
+        except Exception:
+            self._ai_runtime_error = 'AI worker failed'
+            raise
+        finally:
+            if self._ai_grabber:
+                self._ai_grabber.stop()
+                self._ai_grabber = None
+            self._ai_running = False
+            self._ai_model_loaded = False
+            self.clear_analytics_source('local_ai')
+            self._motion_state = False
+            self._active_smart_tags.clear()
+
+    def _run_ai_detection_loop(self):
         # Lazy imports
         try:
             import cv2
             from ultralytics import YOLO
         except ImportError as e:
+            self._ai_runtime_error = 'AI dependencies are unavailable'
             print(f"  [AI Error] Failed to import cv2 or ultralytics. Make sure they are installed: {e}")
             from datetime import datetime
             self.event_logs.append({
@@ -1222,16 +1259,22 @@ class VirtualONVIFCamera:
             return
 
         # Determine stream URL
-        stream_path = f"{self.path_name}_sub" if (self.sub_stream_url and not self.disable_substream) else self.path_name
-        local_url = f"rtsp://127.0.0.1:{self.rtsp_port}/{stream_path}"
+        local_url = internal_rtsp_url(self, 'sub' if self.sub_stream_url else 'main')
         
-        print(f"  [AI Camera ({self.name})] Connecting to stream: {local_url}")
+        print(f"  [AI Camera ({self.name})] Connecting to stream: {redact_rtsp_url(local_url)}")
         grabber = RTSPFrameGrabber(local_url)
+        self._ai_grabber = grabber
         grabber.start(cv2)
             
         try:
             model = get_shared_ai_model(self.ai_model)
+            # A loaded file alone does not prove the inference environment works.
+            import numpy as np
+            with _AI_INFERENCE_LOCK:
+                model(np.zeros((320, 320, 3), dtype=np.uint8), verbose=False)
+            self._ai_model_loaded = True
         except Exception as e:
+            self._ai_runtime_error = 'AI model could not run inference'
             print(f"  [AI Error] Failed to load YOLO model: {e}")
             from datetime import datetime
             self.event_logs.append({
@@ -1302,6 +1345,7 @@ class VirtualONVIFCamera:
             zone_points = self.ai_zone if len(self.ai_zone) >= 3 else None
         zone_mask = None
         zone_pixel_count = 0
+        processed_frame_at = 0.0
         
         while self._ai_running:
             loop_start = time.time()
@@ -1310,7 +1354,15 @@ class VirtualONVIFCamera:
             last_loop_time = loop_start
             
             raw_frame = grabber.latest_frame
-            if raw_frame is not None:
+            frame_at = grabber.last_frame_at
+            fresh_frame = bool(raw_frame is not None and frame_at and time.time() - frame_at <= 5.0)
+            if fresh_frame:
+                self._ai_last_frame_at = frame_at
+            elif motion_state:
+                motion_state = False
+                self._trigger_ai_motion(False, [])
+            if fresh_frame and frame_at != processed_frame_at:
+                processed_frame_at = frame_at
                 try:
                     # Optimize CPU usage by resizing frame before processing
                     h, w = raw_frame.shape[:2]
@@ -1361,7 +1413,7 @@ class VirtualONVIFCamera:
                         prev_gray = gray
                         
                         # Only run AI if enough motion detected
-                        if change_pct < motion_threshold:
+                        if self.ai_motion_detection_enabled and change_pct < motion_threshold:
                             # No significant motion — check cooldown for clearing state
                             self.ai_last_detection = []
                             if motion_state and (time.time() - last_detected_time > cooldown_period):
@@ -1431,7 +1483,8 @@ class VirtualONVIFCamera:
                                         # If it's a vehicle and we target license plates, run LPR
                                         if tag == 'vehicle' and has_license_plate_target:
                                             try:
-                                                lp_model = get_shared_ai_model("keremberke/yolov8n-license-plate-detector")
+                                                from .ai_device import get_shared_plate_model
+                                                lp_model = get_shared_plate_model()
                                                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                                                 vx1, vy1, vx2, vy2 = map(int, [x1, y1, x2, y2])
                                                 vx1 = max(0, vx1)
@@ -1535,6 +1588,7 @@ class VirtualONVIFCamera:
                     consecutive_errors += 1
                     print(f"  [AI Camera ({self.name})] Error in inference loop: {ex}")
                     if consecutive_errors >= max_consecutive_errors:
+                        self._ai_runtime_error = 'AI inference repeatedly failed'
                         print(f"  [AI Camera ({self.name})] AI disabled after {consecutive_errors} consecutive errors")
                         self._ai_running = False
                         break

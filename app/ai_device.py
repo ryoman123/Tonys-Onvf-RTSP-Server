@@ -6,6 +6,24 @@ MPS uses unified memory so there is no CPU↔GPU copy overhead.
 """
 
 import threading
+from pathlib import Path
+
+LPR_MODEL_REPO = 'joker5914/yolov8n-license-plate'
+LPR_MODEL_REVISION = '8286762929bd4b111a19186f2a05e0a5940b6088'
+
+
+def get_shared_plate_model():
+    """Load the pinned plate model; production images carry it offline."""
+    from .config import ROOT_DIR, DATA_DIR
+    bundled = Path(ROOT_DIR) / 'models' / 'license_plate.pt'
+    if bundled.is_file():
+        path = str(bundled)
+    else:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo_id=LPR_MODEL_REPO, filename='best.pt',
+                               revision=LPR_MODEL_REVISION,
+                               cache_dir=str(Path(DATA_DIR) / 'models'))
+    return get_shared_model(path)
 
 _AI_MODELS = {}
 _AI_MODEL_LOCK = threading.Lock()

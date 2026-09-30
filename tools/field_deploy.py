@@ -114,6 +114,10 @@ def prepare(args):
                              '/work/camera_config.json', '--parent-interface', args.parent, '--preserve-port-80'])
     print(result.stdout.strip())
     config = json.loads((stage / 'camera_config.json').read_text())
+    if args.local_ai:
+        for camera in config['cameras']:
+            camera.update(enableEventForwarding=True, eventSource='ai', aiMotionDetectionEnabled=True)
+        write_private(stage / 'camera_config.json', config)
     validate_config(config, args.expected_cameras)
     # Validate/probe in the new image, avoiding extra host Python dependencies.
     result = image_tool(plan, ['tools/field_preflight.py', '/work/camera_config.json',
@@ -170,20 +174,22 @@ def rollback(plan):
     print('ROLLBACK COMPLETE: original container is running; verify its streams in Protect')
 
 
-def wait_acceptance(plan, timeout=300):
+def wait_acceptance(plan, timeout=300, *, smart_pipeline=False):
     manifest = json.loads((Path(plan['stage']) / 'identity.json').read_text())
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             status = fetch_json('http://127.0.0.1:5552/api/readiness')
             result = evaluate_acceptance(status, expected_cameras=plan['expectedCameras'],
-                expected_manifest=manifest, require_pullpoint_subscribers=True, require_analytics=True)
+                expected_manifest=manifest, require_pullpoint_subscribers=smart_pipeline,
+                require_analytics=True, require_smart_pipeline=smart_pipeline)
             if result['passed']:
                 return status
         except (OSError, ValueError):
             pass
         time.sleep(5)
-    raise RuntimeError('candidate failed the 29-camera identity/listener/PullPoint/analytics gate')
+    raise RuntimeError('candidate failed the smart-pipeline gate' if smart_pipeline
+                       else 'candidate failed the camera/video/configured-analytics gate')
 
 
 def deploy(plan):
@@ -222,7 +228,7 @@ def deploy(plan):
         print(output_check.stdout.strip())
         # The output probe can run for several minutes. Recheck Protect and identity afterwards.
         baseline = wait_acceptance(plan)
-        print('PASS: candidate identity/listener/PullPoint/analytics gate; starting soak')
+        print('PASS: candidate camera/video/configured-analytics gate; starting soak')
         deadline = time.monotonic() + plan['soakSeconds']
         while time.monotonic() < deadline:
             time.sleep(min(10, max(0, deadline - time.monotonic())))
@@ -230,12 +236,28 @@ def deploy(plan):
             if continuity_failures(baseline, current):
                 raise RuntimeError('candidate continuity failed during soak')
             baseline = current
-        plan['phase'] = 'accepted'
+        plan['phase'] = 'video-verified'
         write_private(stage / 'deployment.json', plan)
-        print('ACCEPTED: automated gate passed. Verify HQ/LQ playback and real smart events in Protect.')
+        print('VIDEO VERIFIED: configure Protect listener and detection; run verify-smart next. Full deployment acceptance is pending.')
     except BaseException:
         rollback(plan)
         raise
+
+
+def verify_smart(plan):
+    if plan['phase'] not in ('video-verified', 'smart-pipeline-verified'):
+        raise ValueError('smart verification requires a running, video-verified candidate')
+    baseline = wait_acceptance(plan, smart_pipeline=True)
+    deadline = time.monotonic() + plan['soakSeconds']
+    while time.monotonic() < deadline:
+        time.sleep(min(10, max(0, deadline - time.monotonic())))
+        current = wait_acceptance(plan, timeout=15, smart_pipeline=True)
+        if continuity_failures(baseline, current):
+            raise RuntimeError('smart pipeline continuity failed during soak')
+        baseline = current
+    plan['phase'] = 'smart-pipeline-verified'
+    write_private(Path(plan['stage']) / 'deployment.json', plan)
+    print('SMART PIPELINE VERIFIED: producer, subscriptions and listener are healthy. Real Protect timeline events, clearing, thumbnails, notifications and restart recovery still require live observation.')
 
 
 def main(argv=None):
@@ -250,7 +272,8 @@ def main(argv=None):
     prep.add_argument('--stage', required=True)
     prep.add_argument('--expected-cameras', type=int, default=29)
     prep.add_argument('--soak-seconds', type=int, default=300)
-    for operation in ('deploy', 'rollback'):
+    prep.add_argument('--local-ai', action='store_true', help="Enable Tony's built-in detector on all migrated cameras")
+    for operation in ('deploy', 'rollback', 'verify-smart'):
         child = sub.add_parser(operation)
         child.add_argument('--stage', required=True)
     args = parser.parse_args(argv)
@@ -263,6 +286,8 @@ def main(argv=None):
     plan = json.loads((Path(args.stage) / 'deployment.json').read_text())
     if args.operation == 'deploy':
         deploy(plan)
+    elif args.operation == 'verify-smart':
+        verify_smart(plan)
     else:
         rollback(plan)
 

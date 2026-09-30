@@ -3,6 +3,9 @@
 Release branch: `ryoman123/Tonys-Onvf-RTSP-Server:unified-grand-design`.
 The existing `onvif-vcam-server` container and `onvif-macvlan.service` remain
 rollback targets. Nothing in this runbook installs or modifies Protect itself.
+Bridge-only acceptance is insufficient for full deployment. Tony's local YOLO,
+alert snapshots, notifications, GridFusion and Protect listener manager are
+retained. Frigate is optional. See [FEATURE_PARITY.md](FEATURE_PARITY.md).
 
 ## Before cutover
 
@@ -46,6 +49,7 @@ sudo python3 tools/field_deploy.py prepare \
   --legacy-container onvif-vcam-server \
   --legacy-service onvif-macvlan.service \
   --parent ens19 \
+  --local-ai \
   --stage /opt/onvif-unified-field-01
 ```
 
@@ -56,6 +60,10 @@ and encoder tokens. It probes all 58 source streams **sequentially** and writes
 the observed codec/resolution/frame rate into the staged config. The source YAML
 is preserved. Only verified `vcam-*` interfaces with the exact camera MAC and IP
 are eligible for removal. The image is already present before downtime begins.
+`--local-ai` enables Tony's built-in detector on all migrated cameras, using LQ
+where available. Measure inference and queue latency on the actual VM; a
+single-camera image test does not establish 29-camera AI capacity. Without this
+flag migration does not enable local object detection.
 
 The stage directory is mode 0700. Configuration, environment capture, container
 inspection and rollback state are mode 0600 and may contain credentials. Keep
@@ -73,17 +81,50 @@ for reboot safety, releases only the captured camera links, then starts
 `onvif-unified` with host networking, NET_ADMIN, persistent data and restart policy.
 It sets IGMP membership capacity to 128 in the host network namespace.
 
-The startup gate requires all 29 identities and IPs, HTTP/discovery readiness,
-active PullPoint subscribers on every camera, and connectivity for all enabled
-analytics producers. It probes all 58 **MediaMTX output streams** through loopback,
+The initial gate requires all 29 identities and IPs, HTTP/discovery readiness,
+fresh frames and successful warm-up inference for enabled local AI, and
+connectivity for enabled external producers. It probes all 58 **MediaMTX output streams** through loopback,
 then runs a five-minute continuity soak. Failure triggers rollback automatically;
 Ctrl+C during cutover also triggers rollback. A machine power loss cannot execute
 an in-process rollback: retain the stage and use the command below after reboot.
 
-An active PullPoint consumer proves subscription activity, not that a person event
-was written into Protect. The automated success message explicitly leaves that
-final observation to live validation. Disabled analytics producers do not count
-as configured or tested integrations.
+This stops at `video-verified`, never full deployment acceptance. A first install
+must allow the bridge UI to run so the Protect recorder can be configured next;
+requiring its listener before this setup would cause an unavoidable rollback.
+Disabled analytics producers do not count as configured or tested integrations.
+
+## Complete the smart-detection path
+
+1. Open `http://192.168.50.250:5552`. Confirm local AI, desired targets and smart
+   ONVIF topics are enabled. Confirm actual detections and annotated alert history;
+   a test-event button does not prove YOLO recognized an object.
+2. In Settings, open **UniFi NVR ONVIF Listener**, add the actual Protect recorder
+   and its SSH credentials, and use the retained install/status controls. This
+   installs `onvif-recorder` on Protect's recorder, not VM104. Set periodic checks
+   to **5 minutes**, enable monitoring and run a status check. Credentials stay
+   in the local encrypted config; do not put them in shell arguments or Git.
+3. Wait for PullPoint subscribers on every camera. Run inside VM104:
+
+```bash
+sudo python3 tools/field_deploy.py verify-smart --stage /opt/onvif-unified-field-01
+```
+
+This requires a healthy configured smart producer per camera, active PullPoints,
+and an active Protect listener checked within six minutes, then repeats the
+continuity soak. Missing targets, disabled detection, stale frames, failed model
+warm-up and missing/stale recorder checks fail this gate. A verification failure
+leaves the candidate available for diagnosis; use rollback when needed.
+
+The general CLI offers the same strict gate:
+
+```bash
+python3 tools/acceptance_check.py --expected-cameras 29 \
+  --require-analytics --require-smart-pipeline --soak-seconds 300 --interval-seconds 10
+```
+
+`smart-pipeline-verified` and `fullStack.readyForLiveTest` mean the runtime is ready
+for real Protect observations. `fullStack.timelineVerified` stays false:
+subscription activity and a running process do not prove timeline insertion.
 
 ## Manual rollback
 
@@ -109,6 +150,8 @@ Before committing to the new runtime, confirm in Protect:
 - Thumbnails and notifications work if configured; do not confuse a generated
   bridge event with a Protect timeline event.
 - A controlled candidate restart restores identities, streams and subscriptions.
+- The Tony dashboard plays both profiles and GridFusion layouts still compose,
+  with saved layouts, zones, models and notification preferences surviving restart.
 
 The old bridge exposed recorder RTSP paths, while this runtime exposes
 `/<pathName>_main` and `/<pathName>_sub`. Profile/encoder tokens are preserved, but
@@ -119,6 +162,10 @@ and re-adopt cameras merely to make the field gate pass.
 ## Smart detections and reference sources
 
 Native ONVIF motion and external object classification are separate paths.
+Tony's built-in YOLO works without Frigate. Its default COCO model maps bags and
+luggage to the "package" target; this is a heuristic, not a parcel-specific model.
+Plate recognition uses a separate detector and OCR. Validate actual model
+performance on the intended views rather than inferring accuracy from a target.
 Tony's Protect-side integration references
 [`danielwoz/ubiquiti-protect-onvif-event-listener`](https://github.com/danielwoz/ubiquiti-protect-onvif-event-listener).
 That third-party service consumes PullPoints and writes smart events into Protect;

@@ -12,5 +12,6 @@ ffmpeg_temp/
 *.zip
 *.tar.gz
 camera_config.json
+data/
 config/
 scratch/

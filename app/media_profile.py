@@ -13,6 +13,7 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
+from .stream_paths import stream_encoding
 
 
 class MediaProfileError(Exception):
@@ -172,7 +173,7 @@ def profile_definition(camera, kind: str) -> ProfileDefinition:
             framerate=int(camera.main_framerate),
             quality=5,
             bitrate=4096,
-            encoding=str(getattr(camera, "main_encoding", "H264")).upper(),
+            encoding=stream_encoding(camera, 'main'),
             h264_profile="Main",
         )
 
@@ -195,7 +196,7 @@ def profile_definition(camera, kind: str) -> ProfileDefinition:
         framerate=int(camera.sub_framerate),
         quality=3,
         bitrate=1024,
-        encoding=str(getattr(camera, "sub_encoding", "H264")).upper(),
+        encoding=stream_encoding(camera, 'sub'),
         h264_profile="Baseline",
     )
 
