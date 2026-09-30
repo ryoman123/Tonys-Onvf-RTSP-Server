@@ -15,7 +15,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.field_preflight import validate_config, write_private
@@ -41,9 +43,40 @@ def inspect_container(name):
 
 def image_tool(plan, command):
     stage = str(Path(plan['stage']).resolve())
-    return run(['docker', 'run', '--rm', '--network', 'host',
+    name = 'onvif-field-check-' + uuid.uuid4().hex[:12]
+    args = ['docker', 'run', '--rm', '--name', name, '--network', 'host',
         '--env-file', stage + '/legacy.env', '-v', stage + ':/work',
-        plan['image'], 'python', *command], timeout=1800)
+        '-v', str(Path(__file__).with_name('field_preflight.py').resolve())
+              + ':/app/tools/field_preflight.py:ro',
+        plan['image'], 'python', '-u', *command]
+    # Stream the tools' credential-free progress. Raw stderr stays private.
+    with tempfile.NamedTemporaryFile(mode='w+', dir=stage) as output, \
+         tempfile.NamedTemporaryFile(mode='w+', dir=stage, prefix=name + '-',
+                                     suffix='.stderr.log', delete=False) as errors:
+        process = subprocess.Popen(args, stdout=output, stderr=errors, text=True)
+        try:
+            with open(output.name) as progress:
+                deadline = time.monotonic() + 1800
+                while process.poll() is None:
+                    chunk = progress.read()
+                    if chunk:
+                        print(chunk, end='', flush=True)
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('field image check timed out')
+                    time.sleep(0.2)
+                print(progress.read(), end='', flush=True)
+            if process.returncode:
+                errors.seek(0)
+                for line in errors.read().splitlines():
+                    if re.fullmatch(r'FAIL: camera \d+ (main|sub): source video probe failed \([a-zA-Z /-]+\)', line):
+                        raise RuntimeError(line.removeprefix('FAIL: '))
+                raise RuntimeError('field image check failed; see private staging logs')
+            os.unlink(errors.name)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+                run(['docker', 'rm', '-f', name], timeout=30, check=False)
 
 
 def capture_interfaces(config, interfaces):
@@ -109,10 +142,10 @@ def prepare(args):
             'legacyId': old['Id'], 'legacyImage': old['Image'],
             'legacyService': args.legacy_service, 'serviceEnabled': enabled,
             'serviceActive': active, 'expectedCameras': args.expected_cameras,
-            'soakSeconds': args.soak_seconds, 'phase': 'preparing'}
-    result = image_tool(plan, ['tools/import_vcam_config.py', '/work/source.yml', '--output',
+            'soakSeconds': args.soak_seconds, 'phase': 'preparing',
+            'sourceProbesDeferred': args.defer_source_probes}
+    image_tool(plan, ['tools/import_vcam_config.py', '/work/source.yml', '--output',
                              '/work/camera_config.json', '--parent-interface', args.parent, '--preserve-port-80'])
-    print(result.stdout.strip())
     config = json.loads((stage / 'camera_config.json').read_text())
     if args.local_ai:
         for camera in config['cameras']:
@@ -120,9 +153,11 @@ def prepare(args):
         write_private(stage / 'camera_config.json', config)
     validate_config(config, args.expected_cameras)
     # Validate/probe in the new image, avoiding extra host Python dependencies.
-    result = image_tool(plan, ['tools/field_preflight.py', '/work/camera_config.json',
-        '--expected-cameras', str(args.expected_cameras), '--refresh-metadata', '--manifest', '/work/identity.json'])
-    print(result.stdout.strip())
+    probe_command = ['tools/field_preflight.py', '/work/camera_config.json',
+        '--expected-cameras', str(args.expected_cameras), '--manifest', '/work/identity.json']
+    if not args.defer_source_probes:
+        probe_command.append('--refresh-metadata')
+    image_tool(plan, probe_command)
     config = json.loads((stage / 'camera_config.json').read_text())
     interfaces = json.loads(run(['ip', '-j', '-d', 'address', 'show']).stdout)
     plan['interfaces'] = capture_interfaces(config, interfaces)
@@ -133,6 +168,8 @@ def prepare(args):
     plan['phase'] = 'prepared'
     write_private(stage / 'deployment.json', plan)
     print(f'PREPARED: {args.expected_cameras} cameras; old bridge remains running')
+    if args.defer_source_probes:
+        print('Source probes will run after stopping the old bridge, with automatic rollback on failure.')
 
 
 def restore_interface(item):
@@ -213,6 +250,15 @@ def deploy(plan):
     write_private(stage / 'deployment.json', plan)
     try:
         run(['docker', 'stop', '--time', '60', plan['legacyContainer']], timeout=90)
+        if plan.get('sourceProbesDeferred'):
+            print('CHECKING: source streams with the old bridge stopped', flush=True)
+            image_tool(plan, ['tools/field_preflight.py', '/work/camera_config.json',
+                '--expected-cameras', str(plan['expectedCameras']), '--refresh-metadata',
+                '--manifest', '/work/identity.json'])
+            shutil.copyfile(stage / 'camera_config.json', data / 'camera_config.json')
+            os.chmod(data / 'camera_config.json', 0o600)
+            plan['configSha256'] = __import__('hashlib').sha256((stage / 'camera_config.json').read_bytes()).hexdigest()
+            write_private(stage / 'deployment.json', plan)
         run(['systemctl', 'stop', plan['legacyService']])
         if plan['serviceEnabled'] == 'enabled':
             run(['systemctl', 'disable', plan['legacyService']])
@@ -223,9 +269,8 @@ def deploy(plan):
             '--cap-add', 'NET_ADMIN', '--stop-timeout', '120', '--restart', 'unless-stopped',
             '-v', str(data) + ':/app/data', plan['image']])
         baseline = wait_acceptance(plan)
-        output_check = image_tool(plan, ['tools/field_preflight.py', '/work/camera_config.json',
+        image_tool(plan, ['tools/field_preflight.py', '/work/camera_config.json',
             '--expected-cameras', str(plan['expectedCameras']), '--output-streams'])
-        print(output_check.stdout.strip())
         # The output probe can run for several minutes. Recheck Protect and identity afterwards.
         baseline = wait_acceptance(plan)
         print('PASS: candidate camera/video/configured-analytics gate; starting soak')
@@ -273,6 +318,8 @@ def main(argv=None):
     prep.add_argument('--expected-cameras', type=int, default=29)
     prep.add_argument('--soak-seconds', type=int, default=300)
     prep.add_argument('--local-ai', action='store_true', help="Enable Tony's built-in detector on all migrated cameras")
+    prep.add_argument('--defer-source-probes', action='store_true',
+        help='Probe sources during cutover after stopping the old bridge; failures automatically roll back')
     for operation in ('deploy', 'rollback', 'verify-smart'):
         child = sub.add_parser(operation)
         child.add_argument('--stage', required=True)

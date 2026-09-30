@@ -70,6 +70,21 @@ inspection and rollback state are mode 0600 and may contain credentials. Keep
 these local and out of GitHub. A failed prepare leaves the running bridge intact;
 use a fresh stage directory after fixing the cause.
 
+When the existing bridge is consuming recorder sessions, add
+`--defer-source-probes` to `prepare`. Migration, identity checks, interface
+inventory and rollback capture still run while the old bridge is online. During
+`deploy`, the old bridge stops before source probes run; any failed source check
+restores the old bridge automatically. This flag moves the checks into the
+cutover and does not bypass them. Source metadata is refreshed before the new
+container starts.
+
+The deployment helper mounts its checked-out `field_preflight.py` read-only into
+temporary check containers. This allows a tested helper update to use an already
+validated, immutable application image. Check progress is streamed, and failures
+identify the camera and feed without exposing URLs or credentials. Private
+`*.stderr.log` files are retained in the stage after failed checks. Frame rates
+are measured from a bounded sample of video packets rather than DVR headers.
+
 ## Cutover and automatic rollback
 
 ```bash

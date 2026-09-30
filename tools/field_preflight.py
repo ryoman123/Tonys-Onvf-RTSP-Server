@@ -11,9 +11,10 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
+from statistics import median
 import subprocess
 import sys
-from fractions import Fraction
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -86,23 +87,48 @@ def validate_config(config, expected=29):
 def probe_video(url, timeout=20):
     try:
         result = subprocess.run(['ffprobe', '-v', 'error', '-rtsp_transport', 'tcp',
-            '-select_streams', 'v:0', '-show_entries',
-            'stream=codec_name,width,height,avg_frame_rate,r_frame_rate', '-of', 'json', url],
+            '-analyzeduration', '500000', '-probesize', '1000000', '-fpsprobesize', '0',
+            '-select_streams', 'v:0', '-read_intervals', '%+#16', '-show_entries',
+            'stream=codec_name,width,height:packet=pts_time,dts_time', '-of', 'json', url],
             capture_output=True, text=True, timeout=timeout, check=True)
-        stream = json.loads(result.stdout)['streams'][0]
+        payload = json.loads(result.stdout)
+        stream = payload['streams'][0]
         codec = {'h264': 'H264', 'hevc': 'H265', 'h265': 'H265'}[stream['codec_name']]
-        try:
-            fps = Fraction(stream.get('avg_frame_rate', '0/1'))
-        except (ValueError, ZeroDivisionError):
-            fps = Fraction(0)
-        if fps <= 0:
-            fps = Fraction(stream['r_frame_rate'])
+        # Some DVRs advertise a 100 fps HEVC header for a 7 fps live feed.
+        # Require actual packets and measure their timestamps instead.
+        times = sorted({float(packet.get('pts_time', packet.get('dts_time')))
+                        for packet in payload.get('packets', [])
+                        if packet.get('pts_time', packet.get('dts_time')) not in (None, 'N/A')})
+        if len(times) < 4:
+            raise ValueError('insufficient video packets')
+        interval = median(second - first for first, second in zip(times, times[1:]))
+        fps = 1 / interval
         width, height = int(stream['width']), int(stream['height'])
-        if min(width, height) <= 0 or fps <= 0:
+        if min(width, height) <= 0 or not 0 < fps <= 240:
             raise ValueError('invalid video metadata')
-        return {'Encoding': codec, 'Width': width, 'Height': height, 'Framerate': max(1, round(float(fps)))}
+        return {'Encoding': codec, 'Width': width, 'Height': height, 'Framerate': max(1, round(fps))}
+    except subprocess.TimeoutExpired:
+        raise ValueError('source video probe failed (timed out)') from None
+    except subprocess.CalledProcessError as error:
+        # Only fixed labels may leave the VM; stderr and argv contain secrets.
+        text = error.stderr or ''
+        if isinstance(text, bytes):
+            text = text.decode('utf-8', errors='replace')
+        reason = 'ffprobe exited unsuccessfully'
+        for pattern, label in (
+            (r'\b401\s+Unauthorized\b', 'authentication rejected'),
+            (r'\b403\s+Forbidden\b', 'access rejected'),
+            (r'\b404\s+Not Found\b', 'stream not found'),
+            (r'\b453\s+Not Enough Bandwidth\b', 'recorder session or bandwidth limit'),
+            (r'\b461\s+Unsupported Transport\b', 'TCP transport rejected'),
+            (r'Connection refused', 'connection refused'),
+            (r'Connection timed out', 'connection timed out')):
+            if re.search(pattern, text, re.IGNORECASE):
+                reason = label
+                break
+        raise ValueError(f'source video probe failed ({reason})') from None
     except (subprocess.SubprocessError, OSError, ValueError, KeyError, IndexError, ZeroDivisionError):
-        raise ValueError('source video probe failed (details suppressed to protect credentials)') from None
+        raise ValueError('source video probe failed (valid video packets not observed)') from None
 
 
 def probe_config(config, refresh=False, timeout=20):
@@ -110,8 +136,8 @@ def probe_config(config, refresh=False, timeout=20):
         for kind in ('main', 'sub'):
             try:
                 observed = probe_video(camera[kind + 'StreamUrl'], timeout)
-            except ValueError:
-                raise ValueError(f'camera {index} {kind}: source video probe failed') from None
+            except ValueError as error:
+                raise ValueError(f'camera {index} {kind}: {error}') from None
             for suffix, value in observed.items():
                 if refresh:
                     camera[kind + suffix] = value

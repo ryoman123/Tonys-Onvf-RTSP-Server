@@ -1,14 +1,17 @@
 import copy
+import io
 import json
+import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, Mock
 
 from tools.import_vcam_config import migrate, legacy_uuid_from_mac
 from tools.field_preflight import validate_config, probe_video, write_private
-from tools.field_deploy import capture_interfaces, deploy, rollback
+from tools.field_deploy import capture_interfaces, deploy, rollback, image_tool
 from app.camera import VirtualONVIFCamera
 from app.media_profile import profile_kind_from_token, encoder_kind_from_token, render_get_profiles_response
 from app.event_engine import TOPICS, render_notification_message
@@ -85,12 +88,37 @@ class FieldMigrationTests(unittest.TestCase):
 
     def test_probe_recognizes_hevc_and_fractional_framerate(self):
         payload = {'streams': [{'codec_name': 'hevc', 'width': 3840, 'height': 2160,
-                                'avg_frame_rate': '0/0', 'r_frame_rate': '7/1'}]}
-        # avg_frame_rate may be 0/0 on a live stream; fallback must still work.
+                                'avg_frame_rate': '0/0', 'r_frame_rate': '7/1'}],
+                   'packets': [{'pts_time': str(index / 7)} for index in range(8)]}
         with patch('tools.field_preflight.subprocess.run', return_value=SimpleNamespace(stdout=json.dumps(payload))):
             observed = probe_video('rtsp://192.0.2.57/main')
         self.assertEqual(observed['Encoding'], 'H265')
         self.assertEqual(observed['Framerate'], 7)
+
+    def test_probe_measures_packets_instead_of_false_100_fps_header(self):
+        payload = {'streams': [{'codec_name': 'hevc', 'width': 3840, 'height': 2160,
+                               'avg_frame_rate': '100/1', 'r_frame_rate': '100/1'}],
+                   'packets': [{'pts_time': str(index / 7)} for index in (0, 2, 1, 3, 5, 4, 6, 7)]}
+        with patch('tools.field_preflight.subprocess.run', return_value=SimpleNamespace(stdout=json.dumps(payload))):
+            self.assertEqual(probe_video('rtsp://192.0.2.57/main')['Framerate'], 7)
+
+    def test_metadata_without_live_packets_cannot_pass_video_gate(self):
+        payload = {'streams': [{'codec_name': 'hevc', 'width': 3840, 'height': 2160,
+                               'avg_frame_rate': '100/1', 'r_frame_rate': '100/1'}]}
+        with patch('tools.field_preflight.subprocess.run', return_value=SimpleNamespace(stdout=json.dumps(payload))):
+            with self.assertRaisesRegex(ValueError, 'valid video packets not observed'):
+                probe_video('rtsp://user:secret@192.0.2.57/main')
+
+    def test_timeout_and_authentication_reasons_never_echo_credentials(self):
+        url = 'rtsp://user:secret@192.0.2.57/main'
+        for failure, reason in (
+            (subprocess.TimeoutExpired(['ffprobe', url], 20, stderr=url), 'timed out'),
+            (subprocess.CalledProcessError(1, ['ffprobe', url], stderr=url + '\nmethod DESCRIBE failed: 401 Unauthorized'), 'authentication rejected')):
+            with self.subTest(reason=reason), patch('tools.field_preflight.subprocess.run', side_effect=failure):
+                with self.assertRaisesRegex(ValueError, reason) as error:
+                    probe_video(url)
+                self.assertNotIn('secret', str(error.exception))
+                self.assertNotIn('rtsp://', str(error.exception))
 
     def test_private_config_write_removes_preexisting_world_readability(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -118,6 +146,23 @@ class FieldMigrationTests(unittest.TestCase):
 
 
 class FieldTransactionTests(unittest.TestCase):
+    def test_image_tool_reports_safe_camera_failure_and_completed_progress(self):
+        def failed_check(args, *, stdout, stderr, text):
+            stdout.write('camera 1 main: H265 3840x2160 7 fps\n')
+            stdout.flush()
+            stderr.write('rtsp://user:secret@192.0.2.57/main\nFAIL: camera 2 main: source video probe failed (timed out)\n')
+            stderr.flush()
+            return SimpleNamespace(poll=lambda: 1, returncode=1)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('tools.field_deploy.subprocess.Popen', side_effect=failed_check), \
+             redirect_stdout(io.StringIO()) as output:
+            with self.assertRaisesRegex(RuntimeError, 'camera 2 main.*timed out') as error:
+                image_tool({'stage': directory, 'image': 'fake'}, ['tools/field_preflight.py'])
+            self.assertIn('camera 1 main', output.getvalue())
+            self.assertNotIn('secret', output.getvalue() + str(error.exception))
+            for private_log in Path(directory).glob('*.stderr.log'):
+                self.assertEqual(private_log.stat().st_mode & 0o777, 0o600)
+
     def interfaces(self):
         camera = migrated_config()['cameras'][0]
         return [
@@ -167,3 +212,55 @@ class FieldTransactionTests(unittest.TestCase):
                     deploy(plan)
                 restore.assert_called_once_with(plan)
                 self.assertIn(['docker', 'stop', '--time', '60', 'old'], [call.args[0] for call in commands.call_args_list])
+
+    def test_deferred_probe_failure_restores_old_bridge_before_starting_candidate(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            write_private(stage / 'camera_config.json', migrated_config())
+            inventory = [{'name': 'vcam-1', 'parent': 'ens19', 'mac': '02:42:ac:11:00:01', 'addresses': ['192.0.2.101/24']}]
+            plan = {'stage': directory, 'phase': 'prepared', 'interfaces': inventory,
+                    'configSha256': hashlib.sha256((stage / 'camera_config.json').read_bytes()).hexdigest(),
+                    'legacyContainer': 'old', 'legacyService': 'legacy.service', 'serviceEnabled': 'disabled',
+                    'legacyId': 'original-id', 'legacyImage': 'original-image',
+                    'image': 'fake', 'soakSeconds': 60, 'sourceProbesDeferred': True, 'expectedCameras': 29}
+            with patch('tools.field_deploy.run', return_value=SimpleNamespace(stdout='[]')) as commands, \
+                 patch('tools.field_deploy.capture_interfaces', return_value=inventory), \
+                 patch('tools.field_deploy.inspect_container', return_value={'State': {'Running': True}, 'Id': 'original-id', 'Image': 'original-image'}), \
+                 patch('tools.field_deploy.image_tool', side_effect=RuntimeError('camera 2 main timed out')) as check, \
+                 patch('tools.field_deploy.rollback') as restore:
+                with self.assertRaisesRegex(RuntimeError, 'camera 2 main'):
+                    deploy(plan)
+                restore.assert_called_once_with(plan)
+                self.assertIn('--refresh-metadata', check.call_args.args[1])
+                self.assertEqual([call.args[0][0:2] for call in commands.call_args_list],
+                                 [['ip', '-j'], ['docker', 'stop']])
+
+    def test_deferred_metadata_is_copied_before_candidate_start(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            config = migrated_config()
+            write_private(stage / 'camera_config.json', config)
+            inventory = [{'name': 'vcam-1', 'parent': 'ens19', 'mac': '02:42:ac:11:00:01', 'addresses': ['192.0.2.101/24']}]
+            plan = {'stage': directory, 'phase': 'prepared', 'interfaces': inventory,
+                    'configSha256': hashlib.sha256((stage / 'camera_config.json').read_bytes()).hexdigest(),
+                    'legacyContainer': 'old', 'legacyService': 'legacy.service', 'serviceEnabled': 'disabled',
+                    'legacyId': 'original-id', 'legacyImage': 'original-image',
+                    'image': 'fake', 'soakSeconds': 0, 'sourceProbesDeferred': True, 'expectedCameras': 29}
+            def check_image(plan, command):
+                if '--refresh-metadata' in command:
+                    config['cameras'][0]['mainFramerate'] = 9
+                    write_private(stage / 'camera_config.json', config)
+            def execute(command, **kwargs):
+                if command[:3] == ['docker', 'run', '-d']:
+                    loaded = json.loads((stage / 'data/camera_config.json').read_text())
+                    self.assertEqual(loaded['cameras'][0]['mainFramerate'], 9)
+                return SimpleNamespace(stdout='[]')
+            with patch('tools.field_deploy.run', side_effect=execute), \
+                 patch('tools.field_deploy.capture_interfaces', return_value=inventory), \
+                 patch('tools.field_deploy.inspect_container', return_value={'State': {'Running': True}, 'Id': 'original-id', 'Image': 'original-image'}), \
+                 patch('tools.field_deploy.image_tool', side_effect=check_image), \
+                 patch('tools.field_deploy.wait_acceptance', return_value={}):
+                deploy(plan)
+            self.assertEqual(plan['phase'], 'video-verified')
