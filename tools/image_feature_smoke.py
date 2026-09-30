@@ -58,7 +58,10 @@ def exercise():
     print('PASS: real YOLO detection, pinned plate-model inference and offline OCR', flush=True)
 
     auth_user, auth_password = 'smoke-relay', 'relay-test-password'
-    source_user, source_password = 'source@', 'p:/?#'
+    # gortsplib's synthetic Basic-auth server rejects ':' in passwords.
+    # Keep reserved URL characters without conflating that server limitation
+    # with the source client's URL-decoding support.
+    source_user, source_password = 'source@', 'p/?#'
     source_reads = []
     class AuthHandler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -83,7 +86,7 @@ def exercise():
         notifier=SimpleNamespace(send_ai_detection=lambda **data: notifications.append(data)),
         onvif_events=[], is_ip_whitelisted=lambda ip: False)
     camera = VirtualONVIFCamera({'id': 1, 'name': 'Offline image smoke', 'pathName': 'smoke',
-        'mainStreamUrl': 'rtsp://source%40:p%3A%2F%3F%23@127.0.0.1:18554/input', 'subStreamUrl': '',
+        'mainStreamUrl': 'rtsp://source%40:p%2F%3F%23@127.0.0.1:18554/input', 'subStreamUrl': '',
         'rtspPort': 18554, 'mainEncoding': 'H265', 'mainWidth': 640, 'mainHeight': 480,
         'mainFramerate': 4, 'disableSubstream': True, 'enableEventForwarding': True,
         'eventSource': 'ai', 'aiTargets': ['person', 'vehicle'], 'aiMotionDetectionEnabled': False,
@@ -167,6 +170,12 @@ def exercise():
             for topic in ('UserAlarm/IVA/HumanShapeDetect', 'VehicleAlarm/IVB/VehicleDetect'):
                 require(('tns1:' + topic, 'false') in seen, 'local detector stop did not clear ONVIF state')
             print('PASS: authenticated HEVC -> local YOLO -> authenticated ONVIF start/clear, alert snapshots and browser H.264 preview', flush=True)
+    except Exception:
+        if 'logs' in locals():
+            logs.flush()
+            logs.seek(0)
+            print('Loopback media diagnostics:', logs.read()[-5000:], flush=True)
+        raise
     finally:
         camera.stop_ai_detection()
         for process in reversed(processes):
