@@ -9,10 +9,18 @@ from app.device_identity import (
     normalize_mac,
     normalize_uuid,
     scope_uris,
+    virtual_nic_name,
 )
 
 
 class DeviceIdentityTests(unittest.TestCase):
+    def test_29_legacy_mac_uuid_nics_are_distinct(self):
+        uuids = [f"0242ac11-{index:04x}-0000-0000-000000000000" for index in range(1, 30)]
+        names = [virtual_nic_name(value) for value in uuids]
+        self.assertEqual(len(set(names)), 29)
+        self.assertTrue(all(len(name) <= 15 for name in names))
+        self.assertEqual(names, [virtual_nic_name(value) for value in uuids])
+
     def test_uuid_and_generated_mac_are_canonical_and_stable(self):
         value = normalize_uuid("550E8400-E29B-41D4-A716-446655440000")
         self.assertEqual(value, "550e8400-e29b-41d4-a716-446655440000")

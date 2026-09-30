@@ -726,7 +726,7 @@ class CameraManager:
     
     def add_camera(self, name, host, rtsp_port, username, password, main_path, sub_path, auto_start=False,
                    main_width=1920, main_height=1080, sub_width=640, sub_height=480,
-                   main_framerate=30, sub_framerate=15, onvif_port=None,
+                   main_framerate=30, sub_framerate=15, main_encoding='H264', sub_encoding='H264', onvif_port=None,
                    transcode_sub=False, transcode_main=False,
                    disable_substream=False, use_main_as_substream=False,
                    enable_audio=False, transcode_main_audio=False, transcode_sub_audio=False,
@@ -806,6 +806,8 @@ class CameraManager:
             'subHeight': sub_height,
             'mainFramerate': main_framerate,
             'subFramerate': sub_framerate,
+            'mainEncoding': main_encoding,
+            'subEncoding': sub_encoding,
             'onvifUsername': self.global_username,
             'onvifPassword': self.global_password,
             'transcodeSub': transcode_sub,
@@ -883,7 +885,7 @@ class CameraManager:
 
     def update_camera(self, camera_id, name, host, rtsp_port, username, password, main_path, sub_path, auto_start=False,
                       main_width=1920, main_height=1080, sub_width=640, sub_height=480,
-                      main_framerate=30, sub_framerate=15, onvif_port=None,
+                      main_framerate=30, sub_framerate=15, main_encoding=None, sub_encoding=None, onvif_port=None,
                       transcode_sub=False, transcode_main=False,
                       disable_substream=False, use_main_as_substream=False,
                       enable_audio=False, transcode_main_audio=False, transcode_sub_audio=False,
@@ -975,6 +977,10 @@ class CameraManager:
         camera.sub_height = sub_height
         camera.main_framerate = main_framerate
         camera.sub_framerate = sub_framerate
+        if main_encoding is not None:
+            camera.main_encoding = camera._normalize_video_encoding(main_encoding)
+        if sub_encoding is not None:
+            camera.sub_encoding = sub_encoding
         camera.onvif_username = self.global_username
         camera.onvif_password = self.global_password
         camera.transcode_sub = transcode_sub

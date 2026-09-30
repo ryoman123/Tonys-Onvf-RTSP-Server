@@ -121,7 +121,7 @@ class EventEngineTests(unittest.TestCase):
         selected = parse_topic_filter(body)
         self.assertEqual(
             selected,
-            {TOPICS["person"], TOPICS["animal"], TOPICS["package"]},
+            {TOPICS["person"]},
         )
 
     def test_pull_parsing_enforces_bounds(self):
@@ -170,8 +170,8 @@ class EventEngineTests(unittest.TestCase):
         self.assertIn("CellMotionDetector", xml)
         self.assertIn("HumanShapeDetect", xml)
         self.assertIn("VehicleDetect", xml)
-        self.assertIn("AnimalDetect", xml)
-        self.assertIn("PackageDetect", xml)
+        self.assertIn("DogCatDetect", xml)
+        self.assertIn("Package", xml)
 
 
 if __name__ == "__main__":

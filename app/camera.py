@@ -8,6 +8,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from werkzeug.serving import make_server, ThreadedWSGIServer
 from .config import (
@@ -22,11 +23,12 @@ from .device_identity import (
     normalize_identity,
     normalize_mac,
     normalize_uuid,
+    virtual_nic_name,
 )
 from .linux_network import LinuxNetworkManager
 from .utils import get_local_ip
 from .ai_device import get_shared_model as get_shared_ai_model, AI_INFERENCE_LOCK as _AI_INFERENCE_LOCK
-from .analytics_events import AnalyticsStateAggregator, to_onvif_event, topic_to_type
+from .analytics_events import AnalyticsStateAggregator, TYPE_TO_TOPIC, to_onvif_event, topic_to_type
 
 
 class ThreadPoolWSGIServer(ThreadedWSGIServer):
@@ -172,6 +174,14 @@ class VirtualONVIFCamera:
         self.rtsp_port = config.get('rtspPort', MEDIAMTX_PORT)
         self.onvif_port = config.get('onvifPort', 8000 + self.id)
         self.path_name = config.get('pathName', f'camera{self.id}')
+        self.media_tokens = dict(config.get('mediaTokens') or {})
+        allowed_tokens = {'mainProfile', 'subProfile', 'mainEncoder', 'subEncoder'}
+        if any(key not in allowed_tokens or not isinstance(value, str)
+               or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,200}', value) for key, value in self.media_tokens.items()):
+            raise ValueError('Invalid persistent Media token configuration')
+        for main, sub in (('mainProfile', 'subProfile'), ('mainEncoder', 'subEncoder')):
+            if main in self.media_tokens and self.media_tokens.get(main) == self.media_tokens.get(sub):
+                raise ValueError('Main and sub Media tokens must differ')
         self.username = config.get('username', 'admin')
         self.password = config.get('password', '')
         self.auto_start = config.get('autoStart', False)
@@ -183,6 +193,15 @@ class VirtualONVIFCamera:
         # Frame rate settings
         self.main_framerate = config.get('mainFramerate', 30)
         self._sub_framerate = config.get('subFramerate', 15)
+        # Protect must see the codec that is actually delivered. H.265/HEVC is
+        # a first-class pass-through mode for the field deployment; transcoded
+        # streams are H.264 because MediaMTX launches libx264 for transcoding.
+        self.main_encoding = self._normalize_video_encoding(
+            config.get('mainEncoding', 'H264')
+        )
+        self._sub_encoding = self._normalize_video_encoding(
+            config.get('subEncoding', 'H264')
+        )
         # Runtime-only: actual source stream attributes probed at start (issue #42)
         self.stream_probe = {}
         
@@ -326,6 +345,33 @@ class VirtualONVIFCamera:
             identity=self.identity,
         )
 
+    @staticmethod
+    def _normalize_video_encoding(value):
+        text = str(value or 'H264').strip().upper().replace('.', '')
+        if text in {'H265', 'HEVC'}:
+            return 'H265'
+        if text in {'H264', 'AVC'}:
+            return 'H264'
+        raise ValueError(f"Unsupported video encoding: {value!r}")
+
+    @staticmethod
+    def _codec_matches_encoding(codec, encoding):
+        observed = str(codec or '').strip().lower()
+        expected = VirtualONVIFCamera._normalize_video_encoding(encoding)
+        if not observed:
+            return True
+        if expected == 'H265':
+            return observed in {'h265', 'hevc'}
+        return observed in {'h264', 'avc'}
+
+    @property
+    def sub_encoding(self):
+        return self.main_encoding if self.use_main_as_substream else self._sub_encoding
+
+    @sub_encoding.setter
+    def sub_encoding(self, value):
+        self._sub_encoding = self._normalize_video_encoding(value)
+
     def get_effective_ip(self):
         """Determine the IP address that should be reported for this camera"""
         # 1. Use the specific IP assigned to a Virtual NIC if active
@@ -356,16 +402,19 @@ class VirtualONVIFCamera:
                 # Setup Virtual NIC if requested (Linux only)
                 if self.use_virtual_nic and self.network_mgr:
                     # VNIC name must be <= 15 chars on Linux.
-                    # Use UUID (stripped of hyphens) to ensure uniqueness regardless of camera name.
-                    vnic_name = f"vnic_{self.uuid.replace('-', '')[:10]}"
-                    if self.network_mgr.create_macvlan(self.parent_interface, vnic_name, self.nic_mac):
-                        self.assigned_ip = self.network_mgr.setup_ip(
-                            vnic_name,
-                            self.ip_mode,
-                            self.static_ip,
-                            self.netmask,
-                            self.gateway
-                        )
+                    # Hash the full UUID, including legacy MAC-derived suffixes.
+                    vnic_name = virtual_nic_name(self.uuid)
+                    if not self.network_mgr.create_macvlan(self.parent_interface, vnic_name, self.nic_mac):
+                        raise RuntimeError(f"Cannot create virtual NIC for {self.name}")
+                    self.assigned_ip = self.network_mgr.setup_ip(
+                        vnic_name,
+                        self.ip_mode,
+                        self.static_ip,
+                        self.netmask,
+                        self.gateway
+                    )
+                    if not self.assigned_ip:
+                        raise RuntimeError(f"Cannot assign virtual NIC IP for {self.name}")
                     # Give the system and router a moment to stabilize
                     time.sleep(0.5)
                     if self.assigned_ip:
@@ -415,7 +464,7 @@ class VirtualONVIFCamera:
                     entry['mismatch'] = (
                         info['width'] != self.main_width or
                         info['height'] != self.main_height or
-                        info['codec'] not in ('h264', '')
+                        not self._codec_matches_encoding(info.get('codec'), self.main_encoding)
                     )
                     probe['main'] = entry
 
@@ -429,7 +478,7 @@ class VirtualONVIFCamera:
                     entry['mismatch'] = (
                         info['width'] != self.sub_width or
                         info['height'] != self.sub_height or
-                        info['codec'] not in ('h264', '')
+                        not self._codec_matches_encoding(info.get('codec'), self.sub_encoding)
                     )
                     probe['sub'] = entry
 
@@ -442,7 +491,8 @@ class VirtualONVIFCamera:
                         e = probe.get(which)
                         if e and e.get('mismatch'):
                             print(f"  [Stream Check] {self.name} {which}: configured "
-                                  f"{e['configuredWidth']}x{e['configuredHeight']} H264 but source is "
+                                  f"{e['configuredWidth']}x{e['configuredHeight']} "
+                                  f"{self.main_encoding if which == 'main' else self.sub_encoding} but source is "
                                   f"{e['width']}x{e['height']} {e['codec'].upper()} — "
                                   f"NVRs may flap this camera's resolution")
         except Exception as e:
@@ -497,7 +547,7 @@ class VirtualONVIFCamera:
             # Cleanup Virtual NIC only after listeners/threads are gone.
             if self.use_virtual_nic and self.network_mgr:
                 self._stop_keepalive()
-                vnic_name = f"vnic_{self.uuid.replace('-', '')[:10]}"
+                vnic_name = virtual_nic_name(self.uuid)
                 self.network_mgr.remove_interface(vnic_name)
                 self.assigned_ip = None
         
@@ -613,6 +663,7 @@ class VirtualONVIFCamera:
             'rtspPort': self.rtsp_port,
             'onvifPort': self.onvif_port,
             'pathName': self.path_name,
+            'mediaTokens': dict(self.media_tokens),
             'username': self.username,
             'password': self.password,
             'autoStart': self.auto_start,
@@ -623,6 +674,8 @@ class VirtualONVIFCamera:
             'subHeight': self._sub_height,
             'mainFramerate': self.main_framerate,
             'subFramerate': self._sub_framerate,
+            'mainEncoding': self.main_encoding,
+            'subEncoding': self._sub_encoding,
             'onvifUsername': self.onvif_username,
             'onvifPassword': self.onvif_password,
             'transcodeSub': self.transcode_sub,
@@ -703,6 +756,7 @@ class VirtualONVIFCamera:
             'rtspPort': self.rtsp_port,
             'onvifPort': self.onvif_port,
             'pathName': self.path_name,
+            'mediaTokens': dict(self.media_tokens),
             'username': self.username,
             'password': self.password,
             'autoStart': self.auto_start,
@@ -714,6 +768,8 @@ class VirtualONVIFCamera:
             'subHeight': self._sub_height,
             'mainFramerate': self.main_framerate,
             'subFramerate': self._sub_framerate,
+            'mainEncoding': self.main_encoding,
+            'subEncoding': self._sub_encoding,
             'onvifUsername': self.onvif_username,
             'onvifPassword': self.onvif_password,
             'transcodeSub': self.transcode_sub,
@@ -1622,12 +1678,7 @@ class VirtualONVIFCamera:
         # 2. If smart topics are enabled, update individual smart events
         if getattr(self, 'send_smart_onvif_topics', True):
             # Define standard smart mappings
-            mappings = {
-                'person': ('UserAlarm/IVA/HumanShapeDetect', 'State'),
-                'vehicle': ('VehicleAlarm/IVB/VehicleDetect', 'State'),
-                'animal': ('UserAlarm/IVA/AnimalDetect', 'State'),
-                'package': ('UserAlarm/IVA/PackageDetect', 'State')
-            }
+            mappings = {key: TYPE_TO_TOPIC[key] for key in ('person', 'vehicle', 'animal', 'package')}
             
             # Check what's active in the current call
             current_smart_tags = set()

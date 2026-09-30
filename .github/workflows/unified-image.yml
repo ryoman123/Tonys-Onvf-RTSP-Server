@@ -1,0 +1,76 @@
+name: Unified Production Image
+
+on:
+  pull_request:
+    branches:
+      - unified-grand-design
+  push:
+    branches:
+      - unified-grand-design
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build production image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/tonys-onvif-rtsp-server:unified-grand-design
+            ghcr.io/${{ github.repository_owner }}/tonys-onvif-rtsp-server:unified-grand-design-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test production image startup
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/tonys-onvif-rtsp-server:unified-grand-design-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          trap 'docker logs unified-smoke; docker rm -f unified-smoke' EXIT
+          docker run -d --name unified-smoke -p 127.0.0.1:5552:5552 "$IMAGE"
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:5552/api/health > /tmp/unified-health.json; then
+              python -c 'import json; assert json.load(open("/tmp/unified-health.json"))["status"] == "ok"'
+              test "$(curl -s -o /tmp/unified-readiness.json -w '%{http_code}' http://127.0.0.1:5552/api/readiness)" = 503
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Record immutable image
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/tonys-onvif-rtsp-server@${{ steps.build.outputs.digest }}
+        run: |
+          echo "### Immutable unified image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          printf '`%s`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Commit: `%s`\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
