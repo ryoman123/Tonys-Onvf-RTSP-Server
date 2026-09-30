@@ -6403,6 +6403,8 @@ body.theme-dark, body.theme-nord, body.theme-dracula, body.theme-midnight, body.
                 document.getElementById('subHeight').value = camera.subHeight || 480;
                 document.getElementById('mainFramerate').value = camera.mainFramerate || 30;
                 document.getElementById('subFramerate').value = camera.subFramerate || 15;
+                document.getElementById('mainEncoding').value = camera.mainEncoding || 'H264';
+                document.getElementById('subEncoding').value = camera.subEncoding || 'H264';
 
                 
                 // Don't copy ONVIF port or UUID (they need to be unique)

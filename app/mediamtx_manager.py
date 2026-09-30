@@ -584,7 +584,7 @@ class MediaMTXManager:
                         'sourceOnDemandStartTimeout': '10s',
                         'sourceOnDemandCloseAfter': '10s',
                         'record': False,
-                        'disablePublisherOverride': False,
+                        'overridePublisher': True,
                     }
                 
                 config['paths'][f'{camera.path_name}_sub'] = sub_path_cfg

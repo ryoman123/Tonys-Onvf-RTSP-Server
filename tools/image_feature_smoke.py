@@ -73,7 +73,7 @@ def exercise():
     manager = SimpleNamespace(rtsp_port=18554, rtsp_auth_enabled=True,
         global_username=auth_user, global_password=auth_password, server_ip='127.0.0.1',
         notifier=SimpleNamespace(send_ai_detection=lambda **data: notifications.append(data)),
-        onvif_events=[])
+        onvif_events=[], is_ip_whitelisted=lambda ip: False)
     camera = VirtualONVIFCamera({'id': 1, 'name': 'Offline image smoke', 'pathName': 'smoke',
         'mainStreamUrl': 'rtsp://smoke%40:p%3A%2F%3F%23@127.0.0.1:18554/input', 'subStreamUrl': '',
         'rtspPort': 18554, 'mainEncoding': 'H265', 'mainWidth': 640, 'mainHeight': 480,
@@ -82,6 +82,12 @@ def exercise():
         'aiConfidenceThreshold': 25, 'onvifUsername': 'onvif-smoke', 'onvifPassword': 'test-only',
         'notifyAiEnabled': True, 'notifyAiAttachImage': True}, manager)
     camera.status = 'running'
+    dual = VirtualONVIFCamera({'id': 2, 'name': 'Dual-profile smoke', 'pathName': 'dual',
+        'mainStreamUrl': camera.main_stream_url, 'subStreamUrl': camera.main_stream_url,
+        'mainEncoding': 'H265', 'subEncoding': 'H265', 'mainWidth': 640, 'mainHeight': 480,
+        'subWidth': 640, 'subHeight': 480, 'mainFramerate': 4, 'subFramerate': 4,
+        'rtspPort': 18554}, manager)
+    dual.status = 'running'
     camera.onvif_service = ONVIFService(camera)
     client = camera.onvif_service.create_app().test_client()
     def post(path, body):
@@ -89,7 +95,7 @@ def exercise():
         response = client.post(path, data=envelope, auth=(camera.onvif_username, camera.onvif_password))
         require(response.status_code == 200, 'authenticated ONVIF request failed')
         return ET.fromstring(response.data)
-    response = post('/onvif/events_service', '<tev:CreatePullPointSubscription/>')
+    response = post('/onvif/events_service', '<tev:CreatePullPointSubscription><tev:InitialTerminationTime>PT600S</tev:InitialTerminationTime></tev:CreatePullPointSubscription>')
     pull_path = urlparse(response.find('.//' + WSA + 'Address').text).path
     pull = '<tev:PullMessages><tev:Timeout>PT0S</tev:Timeout><tev:MessageLimit>256</tev:MessageLimit></tev:PullMessages>'
     post(pull_path, pull)
@@ -98,7 +104,7 @@ def exercise():
         with tempfile.TemporaryDirectory() as directory:
             relay = MediaMTXManager()
             relay.config_file = str(Path(directory) / 'mediamtx.yml')
-            relay.create_config([camera], rtsp_port=18554, rtsp_username=auth_user, rtsp_password=auth_password)
+            relay.create_config([camera, dual], rtsp_port=18554, rtsp_username=auth_user, rtsp_password=auth_password)
             config = yaml.safe_load(Path(relay.config_file).read_text())
             config['paths']['input'] = {'source': 'publisher'}
             config['logLevel'] = 'error'
@@ -136,8 +142,11 @@ def exercise():
                 require(('tns1:' + topic, 'true') in seen, 'real RTSP inference did not reach authenticated PullMessages')
             require(notifications and notifications[0].get('image_bytes'), 'annotated notification snapshot was not produced')
             require(alert_store.list_alerts(camera_id=1), 'AI alert history was not saved')
-            for browser, codec in ((False, 'hevc'), (True, 'h264')):
-                url = internal_rtsp_url(camera, 'main').rsplit('/', 1)[0] + '/' + stream_path(camera, 'main', browser=browser)
+            probes = [(item, kind, browser, codec) for item, kinds in
+                      ((camera, ('main',)), (dual, ('main', 'sub')))
+                      for kind in kinds for browser, codec in ((False, 'hevc'), (True, 'h264'))]
+            for item, kind, browser, codec in probes:
+                url = internal_rtsp_url(item, kind).rsplit('/', 1)[0] + '/' + stream_path(item, kind, browser=browser)
                 result = subprocess.run(['ffprobe', '-v', 'error', '-rtsp_transport', 'tcp', '-timeout', '30000000',
                     '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'json', url],
                     capture_output=True, text=True, timeout=40)
