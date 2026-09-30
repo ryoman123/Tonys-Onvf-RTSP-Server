@@ -6,6 +6,7 @@ loopback; no physical camera, NVR, credential or notification service is used.
 This checks image capabilities, not object accuracy at a customer site.
 """
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import base64
 import json
 from pathlib import Path
 import subprocess
@@ -14,8 +15,8 @@ import tempfile
 import threading
 import time
 from types import SimpleNamespace
-from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -40,6 +41,35 @@ TT = '{http://www.onvif.org/ver10/schema}'
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+def check_webrtc_negotiation(path, username, password):
+    # Negotiate the baseline H.264 / Opus pair offered by browsers. This checks
+    # WHEP signaling and track compatibility, not a routed ICE/DTLS media session.
+    shared = ['a=ice-ufrag:smoketest', 'a=ice-pwd:smoketestpassword1234567890',
+        'a=fingerprint:sha-256 ' + ':'.join(['01'] * 32), 'a=setup:actpass',
+        'a=recvonly', 'a=rtcp-mux']
+    lines = ['v=0', 'o=- 1234 1 IN IP4 127.0.0.1', 's=-', 't=0 0',
+        'a=group:BUNDLE 0 1', 'm=video 9 UDP/TLS/RTP/SAVPF 96',
+        'c=IN IP4 0.0.0.0', 'a=mid:0', 'a=rtpmap:96 H264/90000',
+        'a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f'
+        ] + shared + ['m=audio 9 UDP/TLS/RTP/SAVPF 111', 'c=IN IP4 0.0.0.0',
+        'a=mid:1', 'a=rtpmap:111 opus/48000/2'] + shared
+    address = f'http://127.0.0.1:18889/{path}/whep'
+    auth = 'Basic ' + base64.b64encode(f'{username}:{password}'.encode()).decode()
+    request = Request(address, data=('\r\n'.join(lines) + '\r\n').encode(),
+        headers={'Authorization': auth, 'Content-Type': 'application/sdp'}, method='POST')
+    with urlopen(request, timeout=15) as response:
+        require(response.status == 201, 'authenticated WHEP negotiation failed')
+        answer = response.read().decode()
+        location = response.headers.get('Location')
+    if location:
+        with urlopen(Request(urljoin(address, location), method='DELETE',
+                headers={'Authorization': auth, 'If-Match': '*'}), timeout=5):
+            pass
+    require('m=video 0 ' not in answer and 'a=rtpmap:96 H264/90000' in answer,
+            'WHEP did not negotiate preview video')
+    require('m=audio 0 ' not in answer and 'a=rtpmap:111 opus/48000/2' in answer,
+            'WHEP did not negotiate preview audio')
 
 
 def exercise():
@@ -90,6 +120,7 @@ def exercise():
         'mainStreamUrl': 'rtsp://source%40:p%2F%3F%23@127.0.0.1:18554/input', 'subStreamUrl': '',
         'rtspPort': 18554, 'mainEncoding': 'H265', 'mainWidth': 640, 'mainHeight': 480,
         'mainFramerate': 4, 'disableSubstream': True, 'enableEventForwarding': True,
+        'enableAudio': True,
         'eventSource': 'ai', 'aiTargets': ['person', 'vehicle'], 'aiMotionDetectionEnabled': False,
         'aiConfidenceThreshold': 25, 'onvifUsername': 'onvif-smoke', 'onvifPassword': 'test-only',
         'notifyAiEnabled': True, 'notifyAiAttachImage': True}, manager)
@@ -97,6 +128,7 @@ def exercise():
     dual = VirtualONVIFCamera({'id': 2, 'name': 'Dual-profile smoke', 'pathName': 'dual',
         'mainStreamUrl': camera.main_stream_url, 'subStreamUrl': camera.main_stream_url,
         'mainEncoding': 'H265', 'subEncoding': 'H265', 'mainWidth': 640, 'mainHeight': 480,
+        'enableAudio': True,
         'subWidth': 640, 'subHeight': 480, 'mainFramerate': 4, 'subFramerate': 4,
         'rtspPort': 18554}, manager)
     dual.status = 'running'
@@ -121,6 +153,7 @@ def exercise():
             config['paths']['input'] = {'source': 'publisher'}
             config['apiAddress'] = '127.0.0.1:19997'
             config['hlsAddress'] = '127.0.0.1:18888'
+            config['webrtcAddress'] = '127.0.0.1:18889'
             config['logLevel'] = 'error'
             Path(relay.config_file).write_text(yaml.safe_dump(config))
             logs = open(Path(directory) / 'media.log', 'w+')
@@ -129,11 +162,13 @@ def exercise():
             time.sleep(1)
             require(server.poll() is None, 'production MediaMTX rejected the generated configuration')
             publisher = subprocess.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
-                '-re', '-loop', '1', '-i', str(sample), '-vf',
+                '-re', '-loop', '1', '-i', str(sample),
+                '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-vf',
                 'scale=640:480:force_original_aspect_ratio=decrease,pad=640:480:(ow-iw)/2:(oh-ih)/2',
                 '-c:v', 'libx265', '-preset', 'ultrafast', '-tune', 'zerolatency',
                 '-x265-params', 'pools=1:frame-threads=1:log-level=error', '-pix_fmt', 'yuv420p',
-                '-r', '4', '-g', '4', '-an', '-f', 'rtsp', '-rtsp_transport', 'tcp',
+                '-r', '4', '-g', '4', '-c:a', 'aac', '-b:a', '64k', '-ar', '48000',
+                '-ac', '1', '-f', 'rtsp', '-rtsp_transport', 'tcp',
                 f'rtsp://{auth_user}:{auth_password}@127.0.0.1:18554/input'],
                 stdout=logs, stderr=logs)
             processes.append(publisher)
@@ -164,18 +199,23 @@ def exercise():
             for item, kind, browser, codec in probes:
                 url = internal_rtsp_url(item, kind).rsplit('/', 1)[0] + '/' + stream_path(item, kind, browser=browser)
                 result = subprocess.run(['ffprobe', '-v', 'error', '-rtsp_transport', 'tcp', '-timeout', '30000000',
-                    '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'json', url],
+                    '-show_entries', 'stream=codec_type,codec_name', '-of', 'json', url],
                     capture_output=True, text=True, timeout=40)
                 require(result.returncode == 0, 'recorder/browser RTSP probe failed')
-                require(json.loads(result.stdout)['streams'][0]['codec_name'] == codec, 'recorder/browser codec drift')
+                tracks = {(track['codec_type'], track['codec_name']) for track in json.loads(result.stdout)['streams']}
+                require({('video', codec), ('audio', 'opus' if browser else 'aac')} <= tracks,
+                        'recorder/browser video or audio codec drift')
             # Exercise the browser's actual HLS endpoint, including its HTTP
             # authentication, rather than only probing the preview over RTSP.
             hls_url = f'http://{auth_user}:{auth_password}@127.0.0.1:18888/{stream_path(dual, "sub", browser=True)}/index.m3u8'
             result = subprocess.run(['ffprobe', '-v', 'error', '-rw_timeout', '15000000',
-                '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'json', hls_url],
+                '-show_entries', 'stream=codec_type,codec_name', '-of', 'json', hls_url],
                 capture_output=True, text=True, timeout=40)
             require(result.returncode == 0, 'authenticated browser HLS probe failed')
-            require(json.loads(result.stdout)['streams'][0]['codec_name'] == 'h264', 'browser HLS codec drift')
+            tracks = {(track['codec_type'], track['codec_name']) for track in json.loads(result.stdout)['streams']}
+            require({('video', 'h264'), ('audio', 'opus')} <= tracks, 'browser HLS video/audio codec drift')
+            check_webrtc_negotiation(stream_path(dual, 'sub', browser=True), auth_user, auth_password)
+            print('PASS: recorder AAC audio, browser Opus audio and authenticated WHEP track negotiation', flush=True)
             camera.stop_ai_detection()
             seen.update(collect())
             for topic in ('UserAlarm/IVA/HumanShapeDetect', 'VehicleAlarm/IVB/VehicleDetect'):

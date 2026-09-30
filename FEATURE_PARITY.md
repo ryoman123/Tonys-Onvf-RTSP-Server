@@ -13,7 +13,7 @@ protocol certification or live deployment success.
 | Upstream capability | Retained implementation | Improvement / evidence | Remaining field observation |
 |---|---|---|---|
 | RTSP relay, HQ/LQ, audio and explicit transcoding | MediaMTX, camera and Media service | Native H.265 recorder paths; explicit transcode advertises H.264 | Protect live view, playback, codec and audio |
-| Browser grid, matrix profile switching, HLS and WebRTC | Web template | Dedicated on-demand H.264 previews; idle encoders stop | Both playback modes and hover audio |
+| Browser grid, matrix profile switching, HLS and WebRTC | Web template | On-demand baseline H.264/Opus previews; HLS playback, WHEP negotiation and idle shutdown tested | Actual browser playback, routed WebRTC media and hover audio |
 | GridFusion, layouts and looks | Original template and manager | Existing routes and functions preserved | Saved composition, stream and restart persistence |
 | Virtual NIC, DHCP/static IP, keepalive and discovery | Network/lifecycle/identity modules | Collision-free NIC names; persistent adoption identity/tokens | All 29 adopted records recover |
 | Physical ONVIF motion forwarding | Camera forwarder | Bounded shutdown and multi-producer property state | Real physical motion start/clear |
@@ -37,8 +37,11 @@ existing identity, lifecycle, Media, event and adapter regressions remain requir
 disabled. It executes real YOLO on Ultralytics' bundled bus image, plate-model
 inference, English OCR, authenticated loopback H.265 RTSP, the real local detector,
 authenticated ONVIF start/clear, annotated history/notification payloads and a
-separate H.264 browser preview, actual authenticated HLS playback and preview
-encoder shutdown after viewers disconnect. It is not a Protect test and does not establish
+separate baseline H.264/Opus browser previews, preserved AAC recorder audio,
+actual authenticated HLS playback, WHEP video/audio negotiation and preview
+encoder shutdown after viewers disconnect. WHEP signaling is checked without
+an ICE/DTLS media session; routed browser playback remains a field check.
+It is not a Protect test and does not establish
 real-world object accuracy. Publishing follows this exercise and startup smoke.
 
 Plate weights are from [`joker5914/yolov8n-license-plate`](https://huggingface.co/joker5914/yolov8n-license-plate),
@@ -46,6 +49,9 @@ revision `8286762929bd4b111a19186f2a05e0a5940b6088`, file `best.pt` (model card:
 AGPL-3.0). English EasyOCR and default YOLO weights are bundled so initial use
 does not depend on camera-VLAN internet access. Application, dependency and
 model licenses apply to their respective components.
+
+The preview codec pair follows MediaMTX's [WebRTC codec guidance](https://mediamtx.org/docs/features/webrtc-specific-features);
+Opus is also in its [supported HLS audio codecs](https://mediamtx.org/docs/read/hls).
 
 ## What counts as ready
 
