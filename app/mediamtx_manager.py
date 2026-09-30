@@ -244,13 +244,13 @@ class MediaMTXManager:
         width = getattr(camera, kind + '_width')
         height = getattr(camera, kind + '_height')
         fps = getattr(camera, kind + '_framerate')
-        audio = '-map 0:a? -c:a aac -ar 48000 -ac 1 -b:a 64k' if camera.enable_audio else '-an'
+        audio = '-map 0:a? -c:a libopus -ar 48000 -ac 1 -b:a 64k' if camera.enable_audio else '-an'
         args = [str(ffmpeg_exe)]
         args += shlex.split(ff_global) + ['-nostdin'] + shlex.split(ff_input)
         args += ['-i', source, '-map', '0:v:0', '-vf',
                  f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p',
                  '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-                 '-profile:v', 'high', '-threads', '2', '-r', str(fps),
+                 '-profile:v', 'baseline', '-threads', '2', '-r', str(fps),
                  '-g', str(fps), '-sc_threshold', '0']
         args += shlex.split(audio) + ['-f', 'rtsp', '-rtsp_transport', 'tcp', destination]
         cmd = subprocess.list2cmdline(args) if platform.system().lower() == 'windows' else shlex.join(args)
