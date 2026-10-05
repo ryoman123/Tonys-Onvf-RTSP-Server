@@ -308,6 +308,10 @@ class CameraManager:
                 'rtspAuthEnabled': self.rtsp_auth_enabled,
                 'rtspPort': self.rtsp_port,
                 'webPort': getattr(self, 'web_port', 5552),
+                'httpsEnabled': getattr(self, 'https_enabled', False),
+                'httpsCertFile': getattr(self, 'https_cert_file', '/etc/tonys-onvif-server/tls/onvif.crt'),
+                'httpsKeyFile': getattr(self, 'https_key_file', '/etc/tonys-onvif-server/tls/onvif.key'),
+                'httpsHostname': getattr(self, 'https_hostname', ''),
                 'autoBoot': getattr(self, 'auto_boot', False),
                 'openBrowser': getattr(self, 'open_browser', False),
                 'theme': getattr(self, 'theme', 'classic'),
@@ -397,6 +401,10 @@ class CameraManager:
                 self.grid_columns = settings.get('gridColumns', 3)
                 self.rtsp_port = settings.get('rtspPort', 8554)
                 self.web_port = settings.get('webPort', 5552)
+                self.https_enabled = settings.get('httpsEnabled', False)
+                self.https_cert_file = settings.get('httpsCertFile', '/etc/tonys-onvif-server/tls/onvif.crt')
+                self.https_key_file = settings.get('httpsKeyFile', '/etc/tonys-onvif-server/tls/onvif.key')
+                self.https_hostname = settings.get('httpsHostname', '')
                 self.auto_boot = settings.get('autoBoot', False)
                 self.global_username = settings.get('globalUsername', 'admin')
                 self.global_password = settings.get('globalPassword', 'admin')
@@ -460,6 +468,10 @@ class CameraManager:
         self.grid_columns = int(settings.get('gridColumns', self.grid_columns))
         self.rtsp_port = int(settings.get('rtspPort', self.rtsp_port))
         self.web_port = int(settings.get('webPort', self.web_port))
+        self.https_enabled = settings.get('httpsEnabled', getattr(self, 'https_enabled', False))
+        self.https_cert_file = settings.get('httpsCertFile', getattr(self, 'https_cert_file', '/etc/tonys-onvif-server/tls/onvif.crt'))
+        self.https_key_file = settings.get('httpsKeyFile', getattr(self, 'https_key_file', '/etc/tonys-onvif-server/tls/onvif.key'))
+        self.https_hostname = settings.get('httpsHostname', getattr(self, 'https_hostname', ''))
         self.auto_boot = settings.get('autoBoot', self.auto_boot)
         self.global_username = settings.get('globalUsername', self.global_username)
         self.global_password = settings.get('globalPassword', self.global_password)
