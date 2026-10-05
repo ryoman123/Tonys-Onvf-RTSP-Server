@@ -2,6 +2,8 @@ import sys
 import time
 import threading
 import webbrowser
+import os
+import ssl
 from .utils import cleanup_stale_processes, get_local_ip
 from .manager import CameraManager
 from .linux_network import LinuxNetworkManager
@@ -13,6 +15,33 @@ from .updater import check_for_updates
 # Global events for signaling
 shutdown_event = threading.Event()
 restart_requested = False
+
+def _build_web_ssl_context(settings):
+    """Return a TLS context when native HTTPS is configured and usable.
+
+    HTTPS is deliberately fail-open to HTTP: a missing, unreadable or invalid
+    certificate must never prevent the camera bridge from starting.
+    """
+    if not settings.get('httpsEnabled', False):
+        return None
+
+    cert_file = settings.get('httpsCertFile', '/etc/tonys-onvif-server/tls/onvif.crt')
+    key_file = settings.get('httpsKeyFile', '/etc/tonys-onvif-server/tls/onvif.key')
+
+    try:
+        if not os.path.isfile(cert_file):
+            raise FileNotFoundError(f"certificate not found: {cert_file}")
+        if not os.path.isfile(key_file):
+            raise FileNotFoundError(f"private key not found: {key_file}")
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        return context
+    except Exception as exc:
+        print(f"[HTTPS] WARNING: TLS could not be enabled: {exc}")
+        print("[HTTPS] Falling back to HTTP so the Web UI remains reachable.")
+        return None
 
 def main():
     """Main application entry point"""
@@ -103,15 +132,26 @@ def main():
         sys.exit(1)
     
     web_app = create_web_app(manager)
+
+    ssl_context = _build_web_ssl_context(settings)
+    web_scheme = 'https' if ssl_context is not None else 'http'
+
+    # Harden session cookies only when HTTPS is actually active. If TLS setup
+    # fails, HTTP fallback stays usable instead of trapping users behind a
+    # Secure cookie that the browser will not send over HTTP.
+    web_app.config['SESSION_COOKIE_SECURE'] = ssl_context is not None
+    web_app.config['SESSION_COOKIE_HTTPONLY'] = True
+    web_app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
     
-    print(f"\nStarting Web UI on http://localhost:{web_ui_port}")
+    print(f"\nStarting Web UI on {web_scheme}://localhost:{web_ui_port}")
     web_thread = threading.Thread(
         target=lambda: web_app.run(
             host='0.0.0.0',
             port=web_ui_port,
             debug=False,
             use_reloader=False,
-            threaded=True  # Enable threading for better concurrency
+            threaded=True,  # Enable threading for better concurrency
+            ssl_context=ssl_context
         ),
         daemon=True
     )
@@ -126,7 +166,7 @@ def main():
     if settings.get('openBrowser', False) is True:
         print(f"Opening browser...\n")
         try:
-            webbrowser.open(f'http://localhost:{web_ui_port}')
+            webbrowser.open(f'{web_scheme}://localhost:{web_ui_port}')
         except:
             pass
 
@@ -134,7 +174,8 @@ def main():
     print("=" * 60)
     print("SERVER RUNNING")
     print("=" * 60)
-    print(f"Web Interface: http://{local_ip}:{web_ui_port}")
+    web_host = settings.get('httpsHostname') or local_ip
+    print(f"Web Interface: {web_scheme}://{web_host}:{web_ui_port}")
     print(f"RTSP Server: rtsp://{local_ip}:{rtsp_port}")
     print("Press Ctrl+C to stop the server")
     print("=" * 60 + "\n")
